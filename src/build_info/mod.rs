@@ -1,13 +1,17 @@
+//! Build information related functionalities.
+
 use clap::Args;
 
 use crate::TeemiaoError;
 
+/// Build information command
 #[derive(Debug, Args)]
 #[command()]
-pub struct BuildInfo {}
+pub struct BuildInfoCommand {}
 
-impl BuildInfo {
-    pub fn generate(&self) -> Result<(), TeemiaoError> {
-        Ok(())
+impl BuildInfoCommand {
+    /// Run the build information command.
+    pub fn run(&self) -> Result<(), TeemiaoError> {
+        todo!("Implement this function");
     }
 }
