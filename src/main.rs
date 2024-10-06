@@ -29,7 +29,6 @@ impl std::fmt::Display for TeemiaoError {
         .literal(AnsiColor::Blue.on_default().bold())
         .placeholder(AnsiColor::Cyan.on_default())
 )]
-
 struct Cli {
     #[command(flatten)]
     verbose: Verbosity<InfoLevel>,
