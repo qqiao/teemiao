@@ -8,7 +8,13 @@ use crate::TeemiaoError;
 
 use serde::Serialize;
 
-/// Build information command
+/// Generate build information.
+///
+/// This command generates a JSON file containing metadata about the current
+/// build.
+///
+/// The metadata includes the build time and the current git revision of the
+/// code base.
 #[derive(Debug, Args)]
 #[command()]
 pub struct BuildInfoCommand {

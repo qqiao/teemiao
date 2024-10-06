@@ -18,7 +18,7 @@ impl std::fmt::Display for TeemiaoError {
     }
 }
 
-/// Teemiao is a tool that I have created for no particular reason at all just yet.
+/// Teemiao is a set of convenient tools for building other applications.
 #[doc(hidden)]
 #[derive(Debug, Parser)]
 #[command(version, about, arg_required_else_help = true,
@@ -42,7 +42,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 #[doc(hidden)]
 enum Commands {
-    /// Print build information
     BuildInfo(BuildInfoCommand),
 
     /// Generate configuration from template
