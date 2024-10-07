@@ -33,7 +33,7 @@ use std::path::PathBuf;
 #[command()]
 pub struct BuildInfoCommand {
     /// Output file
-    #[arg(short, long, default_value = "./build_info.json", value_name = "FILE")]
+    #[arg(default_value = "./build_info.json", value_name = "FILE")]
     out: Option<PathBuf>,
 }
 
