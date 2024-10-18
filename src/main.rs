@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Teemiao is a set of convenient tools for building other applications.
+
 use crate::build_info::BuildInfoCommand;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
