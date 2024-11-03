@@ -58,7 +58,7 @@ impl BuildInfoCommand {
         });
         // get git revision
         let revision = match std::process::Command::new("git")
-            .args(&["rev-parse", "--short", "HEAD"])
+            .args(["rev-parse", "--short", "HEAD"])
             .output()
         {
             Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
