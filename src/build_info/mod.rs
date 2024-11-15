@@ -19,10 +19,8 @@ use clap::Args;
 use serde::Serialize;
 use std::path::PathBuf;
 
-/// Generate build information.
-///
-/// This command generates a JSON file containing metadata about the current
-/// build.
+/// Automatically generates structured metadata about your build process in JSON
+/// format.
 ///
 /// The metadata includes the build time and the current git revision of the
 /// code base.
