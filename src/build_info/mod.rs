@@ -17,7 +17,7 @@
 use crate::TeemiaoError;
 use clap::Args;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Automatically generates structured metadata about your build process in JSON
 /// format.
@@ -54,14 +54,12 @@ impl BuildInfoCommand {
             path.push("build_info.json");
             path
         });
+
+        let p = Path::new(".").canonicalize().unwrap();
+        let repo = gix::open(p).unwrap();
+
         // get git revision
-        let revision = match std::process::Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-        {
-            Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            Err(_) => "unknown".to_string(),
-        };
+        let revision = repo.head_id().unwrap().shorten().unwrap().to_string();
 
         let build_info = BuildInfo {
             revision,
