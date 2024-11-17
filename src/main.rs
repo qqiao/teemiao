@@ -65,6 +65,10 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
+    env_logger::Builder::new()
+        .filter_level(cli.verbose.log_level_filter())
+        .init();
+
     match cli.command {
         Commands::BuildInfo(build_info) => match build_info.run() {
             Ok(_) => (),
