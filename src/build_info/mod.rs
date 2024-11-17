@@ -84,7 +84,13 @@ impl BuildInfoCommand {
 
         trace!("Getting current directory");
         let p = match Path::new(".").canonicalize() {
-            Ok(p) => p,
+            Ok(p) => match absolute(p) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to get current directory: {}", e);
+                    return Err(TeemiaoError::from(e));
+                }
+            },
             Err(e) => {
                 error!("Failed to get current directory: {}", e);
                 return Err(TeemiaoError::from(e));
