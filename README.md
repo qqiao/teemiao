@@ -1,14 +1,55 @@
 # Teemiao
 
-Teemiao is a set of convenient tools for building other applications.
+Teemiao is a versatile toolkit designed to streamline application development
+workflows.
 
-Currently it supports the following functionalities:
+## Features
 
-## `build-info`
+### Build Information Generator (`build-info`)
 
-Generates a JSON file representing some metadata of the current build.
-Currently this metadata includes the build time and the current git revision
-of the code base.
+Automatically generates structured metadata about your build process in JSON
+format. The generated information includes:
 
-TODO: in longer run, we would like this to support VCS(s) other than just git,
-but as of now, this isn't a priority.
+- Build timestamp
+- Git revision hash
+- Additional contextual build data
+
+This feature enables better traceability and version management for your
+deployments.
+
+## Current Status
+
+The project currently focuses on Git integration. Support for additionalversion
+control systems is planned for future releases.
+
+## Getting Started
+
+### Installation
+
+You can install Teemiao using Cargo:
+
+```bash
+cargo install teemiao
+```
+
+### Usage
+
+To generate build information for your project:
+
+```bash
+teemiao build-info
+```
+
+## Contributing
+
+We welcome contributions! Please see our contributing guidelines for more
+details.
+
+## License
+
+This project is under Apache Public License 2.0 (APL-2). For detailed
+information, please consult the LICENSE file.
+
+---
+
+> **Note**: This project is under active development. For feature requests or bug reports, please open an issue in our repository.

@@ -1,35 +1,47 @@
+// Copyright 2024 Qian Qiao
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Build information related functionalities.
 
+use crate::TeemiaoError;
+use clap::Args;
+use serde::Serialize;
 use std::path::PathBuf;
 
-use clap::Args;
-
-use crate::TeemiaoError;
-
-use serde::Serialize;
-
-/// Generate build information.
-///
-/// This command generates a JSON file containing metadata about the current
-/// build.
+/// Automatically generates structured metadata about your build process in JSON
+/// format.
 ///
 /// The metadata includes the build time and the current git revision of the
 /// code base.
+///
+/// In the longer term, we would like to support VCS(s) other than just git,
+/// but as of now, this isn't a priority.
 #[derive(Debug, Args)]
 #[command()]
 pub struct BuildInfoCommand {
     /// Output file
-    #[arg(short, long)]
+    #[arg(default_value = "./build_info.json", value_name = "FILE")]
     out: Option<PathBuf>,
 }
 
-/// Build information
+/// Build information data structure.
 #[derive(Serialize)]
 pub struct BuildInfo {
-    /// Revision
+    /// Revision is the current git revision of the code base.
     revision: String,
 
-    /// Build time
+    /// Build time is the timestamp of the build.
     build_time: i64,
 }
 
@@ -44,7 +56,7 @@ impl BuildInfoCommand {
         });
         // get git revision
         let revision = match std::process::Command::new("git")
-            .args(&["rev-parse", "--short", "HEAD"])
+            .args(["rev-parse", "--short", "HEAD"])
             .output()
         {
             Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
