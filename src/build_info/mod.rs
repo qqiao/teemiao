@@ -46,30 +46,6 @@ pub struct BuildInfo {
     build_time: i64,
 }
 
-impl From<gix::open::Error> for TeemiaoError {
-    fn from(err: gix::open::Error) -> TeemiaoError {
-        TeemiaoError {
-            message: format!("Failed to open repository: {}", err),
-        }
-    }
-}
-
-impl From<gix::reference::find::existing::Error> for TeemiaoError {
-    fn from(err: gix::reference::find::existing::Error) -> TeemiaoError {
-        TeemiaoError {
-            message: format!("Failed to find reference: {}", err),
-        }
-    }
-}
-
-impl From<gix::id::shorten::Error> for TeemiaoError {
-    fn from(err: gix::id::shorten::Error) -> TeemiaoError {
-        TeemiaoError {
-            message: format!("Failed to get short revision: {}", err),
-        }
-    }
-}
-
 impl BuildInfoCommand {
     /// Run the build information command.
     pub fn run(&self) -> Result<(), TeemiaoError> {
@@ -166,6 +142,30 @@ impl From<serde_json::Error> for TeemiaoError {
         // Convert serde_json::Error to TeemiaoError
         TeemiaoError {
             message: format!("JSON error: {}", err),
+        }
+    }
+}
+
+impl From<gix::open::Error> for TeemiaoError {
+    fn from(err: gix::open::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to open repository: {}", err),
+        }
+    }
+}
+
+impl From<gix::reference::find::existing::Error> for TeemiaoError {
+    fn from(err: gix::reference::find::existing::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to find reference: {}", err),
+        }
+    }
+}
+
+impl From<gix::id::shorten::Error> for TeemiaoError {
+    fn from(err: gix::id::shorten::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to get short revision: {}", err),
         }
     }
 }
