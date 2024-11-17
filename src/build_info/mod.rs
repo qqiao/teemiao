@@ -16,8 +16,9 @@
 
 use crate::TeemiaoError;
 use clap::Args;
+use log::{debug, error, info, trace};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::{absolute, Path, PathBuf};
 
 /// Automatically generates structured metadata about your build process in JSON
 /// format.
@@ -45,6 +46,30 @@ pub struct BuildInfo {
     build_time: i64,
 }
 
+impl From<gix::open::Error> for TeemiaoError {
+    fn from(err: gix::open::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to open repository: {}", err),
+        }
+    }
+}
+
+impl From<gix::reference::find::existing::Error> for TeemiaoError {
+    fn from(err: gix::reference::find::existing::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to find reference: {}", err),
+        }
+    }
+}
+
+impl From<gix::id::shorten::Error> for TeemiaoError {
+    fn from(err: gix::id::shorten::Error) -> TeemiaoError {
+        TeemiaoError {
+            message: format!("Failed to get short revision: {}", err),
+        }
+    }
+}
+
 impl BuildInfoCommand {
     /// Run the build information command.
     pub fn run(&self) -> Result<(), TeemiaoError> {
@@ -54,21 +79,68 @@ impl BuildInfoCommand {
             path.push("build_info.json");
             path
         });
+        let out = absolute(out).unwrap().canonicalize().unwrap();
+        debug!("Output file: {}", &out.display());
 
-        let p = Path::new(".").canonicalize().unwrap();
-        let repo = gix::open(p).unwrap();
+        trace!("Getting current directory");
+        let p = match Path::new(".").canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to get current directory: {}", e);
+                return Err(TeemiaoError::from(e));
+            }
+        };
+        trace!("Current directory: {}", p.display());
 
-        // get git revision
-        let revision = repo.head_id().unwrap().shorten().unwrap().to_string();
+        trace!("Opening git repository");
+        let repo = match gix::open(p) {
+            Ok(repo) => repo,
+            Err(e) => {
+                error!("Failed to open repository: {}", e);
+                return Err(TeemiaoError::from(e));
+            }
+        };
+        trace!("Repository opened successfully");
+
+        trace!("Getting head");
+        let head = match repo.head() {
+            Ok(head) => head,
+            Err(e) => {
+                error!("Failed to get head: {}", e);
+                return Err(TeemiaoError::from(e));
+            }
+        };
+        trace!("Head obtained successfully");
+
+        trace!("Getting short revision");
+        let revision = match head.id() {
+            Some(revision) => match revision.shorten() {
+                Ok(revision) => revision.to_string(),
+                Err(e) => {
+                    error!("Failed to get short revision: {}", e);
+                    return Err(TeemiaoError::from(e));
+                }
+            },
+            None => {
+                error!("Failed to get short revision");
+                return Err(TeemiaoError {
+                    message: "Failed to get short revision".to_string(),
+                });
+            }
+        };
+        trace!("Short revision obtained successfully");
 
         let build_info = BuildInfo {
             revision,
             build_time: chrono::Utc::now().timestamp(),
         };
+        trace!("Build info created successfully");
 
+        trace!("Writing to file");
         // write to file
-        let file = std::fs::File::create(out)?;
+        let file = std::fs::File::create(out.clone())?;
         serde_json::to_writer_pretty(file, &build_info)?;
+        info!("Build info written successfully to {}", &out.display());
 
         Ok(())
     }
