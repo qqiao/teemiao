@@ -18,7 +18,7 @@
 use crate::build_info::BuildInfoCommand;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
-use clap_verbosity_flag::{InfoLevel, Verbosity};
+use clap_verbosity_flag::{Verbosity, WarnLevel};
 
 mod build_info;
 
@@ -46,7 +46,7 @@ impl std::fmt::Display for TeemiaoError {
 )]
 struct Cli {
     #[command(flatten)]
-    verbose: Verbosity<InfoLevel>,
+    verbose: Verbosity<WarnLevel>,
 
     #[command(subcommand)]
     command: Commands,
@@ -72,7 +72,7 @@ fn main() {
     match cli.command {
         Commands::BuildInfo(build_info) => match build_info.run() {
             Ok(_) => (),
-            Err(e) => eprintln!("Error: {}", e),
+            Err(e) => eprintln!("Error generating build info: {}", e),
         },
         Commands::ConfigTemplate => {
             todo!("config template");
