@@ -1,6 +1,6 @@
 [package]
 name = "teemiao"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Teemiao is a versatile toolkit designed to streamline application development workflows."
 license = "Apache-2.0"
