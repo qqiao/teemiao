@@ -19,19 +19,17 @@ use crate::build_info::BuildInfoCommand;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
 use clap_verbosity_flag::{Verbosity, WarnLevel};
+use thiserror::Error;
 
 mod build_info;
 
-/// Teemiao error.
-pub struct TeemiaoError {
-    /// Error message
-    message: String,
-}
-
-impl std::fmt::Display for TeemiaoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
+/// Different types of errors that can occur in Teemiao.
+#[derive(Debug, Error)]
+pub enum TeemiaoError {
+    #[error("Failed to generate build info: {0}")]
+    BuildInfo(#[from] build_info::BuildInfoError),
+    #[error("Failed to generate configuration from template: {0}")]
+    ConfigTemplate(String),
 }
 
 /// Teemiao is a set of convenient tools for building other applications.
