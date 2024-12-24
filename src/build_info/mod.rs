@@ -91,7 +91,7 @@ impl BuildInfoCommand {
             path.push("build_info.json");
             path
         });
-        let out = absolute(out)?.canonicalize()?;
+        let out = absolute(out)?;
         debug!("Output file: {}", &out.display());
 
         trace!("Opening {} as git repository...", &cwd.display());
