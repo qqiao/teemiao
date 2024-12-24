@@ -8,12 +8,13 @@ license = "Apache-2.0"
 [dependencies]
 chrono = "0.4.39"
 clap = { version = "4.5.23", features = ["derive"] }
-clap-verbosity-flag = "3.0.1"
-env_logger = "0.11.5"
+clap-verbosity-flag = "3.0.2"
+env_logger = "0.11.6"
 gix = "0.67.0"
 log = "0.4.22"
 serde = { version = "1.0.216", features = ["derive"] }
-serde_json = "1.0.133"
+serde_json = "1.0.134"
+thiserror = "2.0.9"
 
 [profile.release]
 lto = true
