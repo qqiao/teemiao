@@ -35,6 +35,7 @@ pub enum BuildInfoError {
     #[error("Failed to get short revision: {0}")]
     ShortenRevision(#[from] gix::id::shorten::Error),
 
+    /// The HEAD reference does not point to a valid commit ID.
     #[error("Head ID not found")]
     HeadIdNotFound,
 
@@ -58,23 +59,41 @@ pub enum BuildInfoError {
 #[derive(Debug, Args)]
 #[command()]
 pub struct BuildInfoCommand {
-    /// Output file
+    /// Path to the output file where build information will be written.
+    ///
+    /// If not specified, defaults to `./build_info.json` in the current
+    /// working directory.
     #[arg(default_value = "./build_info.json", value_name = "FILE")]
     out: Option<PathBuf>,
 }
 
 /// Build information data structure.
+///
+/// Contains metadata about the build process including the git revision
+/// and the timestamp when the build was created.
 #[derive(Debug, Serialize)]
 pub struct BuildInfo {
-    /// Revision is the current git revision of the code base.
+    /// The current git revision (short hash) of the code base.
     revision: String,
 
-    /// Build time is the timestamp of the build.
+    /// The Unix timestamp (seconds since epoch) when the build was created.
     build_time: i64,
 }
 
 impl BuildInfoCommand {
-    /// Run the build information command.
+    /// Executes the build information generation command.
+    ///
+    /// This method gathers build metadata from the current git repository
+    /// and writes it to the specified output file in JSON format.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BuildInfoError` if:
+    /// - The current directory cannot be determined or accessed
+    /// - The git repository cannot be opened
+    /// - The HEAD reference cannot be retrieved
+    /// - The output file cannot be created or written to
+    /// - JSON serialization fails
     #[allow(clippy::result_large_err)]
     pub fn run(&self) -> Result<(), BuildInfoError> {
         info!("Generating build info...");
