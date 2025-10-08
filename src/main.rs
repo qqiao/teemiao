@@ -43,9 +43,11 @@ pub enum TeemiaoError {
         .placeholder(AnsiColor::Cyan.on_default())
 )]
 struct Cli {
+    /// Verbosity level for logging output.
     #[command(flatten)]
     verbose: Verbosity<WarnLevel>,
 
+    /// The subcommand to execute.
     #[command(subcommand)]
     command: Commands,
 }
@@ -53,9 +55,16 @@ struct Cli {
 /// Commands supported by Teemiao.
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Generate build information metadata in JSON format.
+    ///
+    /// This command creates a JSON file containing build metadata such as
+    /// the current git revision and build timestamp.
     BuildInfo(BuildInfoCommand),
 
-    /// Generate configuration from template
+    /// Generate configuration from template.
+    ///
+    /// This command will generate configuration files from templates.
+    /// (Currently not implemented)
     ConfigTemplate,
 }
 
