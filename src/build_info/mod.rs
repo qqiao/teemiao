@@ -15,9 +15,9 @@
 //! Build information related functionalities.
 
 use clap::Args;
-use log::{debug, error, info, trace};
+use log::{debug, info, trace};
 use serde::Serialize;
-use std::path::{absolute, PathBuf};
+use std::path::{PathBuf, absolute};
 use thiserror::Error;
 
 /// Errors that can occur while generating build information.
