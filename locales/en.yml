@@ -1,0 +1,14 @@
+_version: 1
+
+cli.about: "Teemiao is a set of convenient tools for building other applications."
+
+commands.build_info.about: "Generate build information metadata in JSON format."
+commands.build_info.long_about: "This command creates a JSON file containing build metadata such as the current git revision and build timestamp."
+
+commands.config_template.about: "Generate configuration from template."
+commands.config_template.long_about: "This command will generate configuration files from templates. (Currently not implemented)"
+
+build_info.out.help: "Path to the output file where build information will be written."
+build_info.out.long_help: "Path to the output file where build information will be written.\n\nIf not specified, defaults to `./build_info.json` in the current working directory."
+
+errors.build_info: "Error generating build info: %{error}"

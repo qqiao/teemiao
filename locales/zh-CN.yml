@@ -1,0 +1,9 @@
+_version: 1
+cli.about: "Teemiao 是一组用于构建其他应用程序的便捷工具。"
+commands.build_info.about: "以 JSON 格式生成构建信息元数据。"
+commands.build_info.long_about: "此命令创建一个包含构建元数据的 JSON 文件，例如当前 git 修订版本和构建时间戳。"
+commands.config_template.about: "从模板生成配置。"
+commands.config_template.long_about: "此命令将从模板生成配置文件。（目前尚未实现）"
+build_info.out.help: "构建信息将写入的输出文件路径。"
+build_info.out.long_help: "构建信息将写入的输出文件路径。\n\n如果未指定，默认为当前工作目录下的 `./build_info.json`。"
+errors.build_info: "生成构建信息时出错：%{error}"

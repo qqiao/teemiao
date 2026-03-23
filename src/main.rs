@@ -19,9 +19,12 @@ use crate::build_info::BuildInfoCommand;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
 use clap_verbosity_flag::{Verbosity, WarnLevel};
+use rust_i18n::t;
 use thiserror::Error;
 
 mod build_info;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// Different types of errors that can occur in Teemiao.
 #[derive(Debug, Error)]
@@ -34,7 +37,9 @@ pub enum TeemiaoError {
 
 /// Teemiao is a set of convenient tools for building other applications.
 #[derive(Debug, Parser)]
-#[command(version, about, arg_required_else_help = true,
+#[command(version,
+    about = t!("cli.about"),
+    arg_required_else_help = true,
     color = ColorChoice::Auto,
     styles = Styles::styled()
         .header(AnsiColor::Green.on_default().bold())
@@ -56,20 +61,53 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Generate build information metadata in JSON format.
-    ///
-    /// This command creates a JSON file containing build metadata such as
-    /// the current git revision and build timestamp.
+    #[command(
+        about = t!("commands.build_info.about"),
+        long_about = t!("commands.build_info.long_about")
+    )]
     BuildInfo(BuildInfoCommand),
 
     /// Generate configuration from template.
-    ///
-    /// This command will generate configuration files from templates.
-    /// (Currently not implemented)
+    #[command(
+        about = t!("commands.config_template.about"),
+        long_about = t!("commands.config_template.long_about")
+    )]
     ConfigTemplate,
+}
+
+/// Detects the user's locale from environment variables.
+///
+/// Checks the following environment variables in order of priority:
+/// 1. `LC_ALL`
+/// 2. `LC_MESSAGES`
+/// 3. `LANG`
+///
+/// Parses values like `zh_CN.UTF-8` into `zh-CN` format.
+/// Returns `"en"` as the default if no locale is detected.
+fn detect_locale() -> String {
+    let raw = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+
+    if raw.is_empty() || raw == "C" || raw == "POSIX" {
+        return "en".to_string();
+    }
+
+    // Strip encoding suffix (e.g. ".UTF-8")
+    let locale = raw.split('.').next().unwrap_or("en");
+
+    // Convert underscore to hyphen (e.g. "zh_CN" -> "zh-CN")
+    locale.replace('_', "-")
 }
 
 #[doc(hidden)]
 fn main() {
+    // Detect and set locale before parsing CLI args so that
+    // all help text produced by clap uses the correct language.
+    let locale = detect_locale();
+    rust_i18n::set_locale(&locale);
+
     let cli = Cli::parse();
 
     env_logger::Builder::new()
@@ -79,7 +117,7 @@ fn main() {
     match cli.command {
         Commands::BuildInfo(build_info) => match build_info.run() {
             Ok(_) => (),
-            Err(e) => eprintln!("Error generating build info: {}", e),
+            Err(e) => eprintln!("{}", t!("errors.build_info", error = e)),
         },
         Commands::ConfigTemplate => {
             todo!("config template");

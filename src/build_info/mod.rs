@@ -16,6 +16,7 @@
 
 use clap::Args;
 use log::{debug, info, trace};
+use rust_i18n::t;
 use serde::Serialize;
 use std::path::{PathBuf, absolute};
 use thiserror::Error;
@@ -63,7 +64,12 @@ pub struct BuildInfoCommand {
     ///
     /// If not specified, defaults to `./build_info.json` in the current
     /// working directory.
-    #[arg(default_value = "./build_info.json", value_name = "FILE")]
+    #[arg(
+        default_value = "./build_info.json",
+        value_name = "FILE",
+        help = t!("build_info.out.help"),
+        long_help = t!("build_info.out.long_help"),
+    )]
     out: Option<PathBuf>,
 }
 
