@@ -97,8 +97,16 @@ fn detect_locale() -> String {
     // Strip encoding suffix (e.g. ".UTF-8") and modifier (e.g. "@latin", "@euro")
     let locale = raw.split(&['.', '@'][..]).next().unwrap_or("en");
 
-    // Convert underscore to hyphen (e.g. "zh_CN" -> "zh-CN")
-    locale.replace('_', "-")
+    // Normalize to language-region with proper casing (e.g. "zh_CN" / "zh-cn" -> "zh-CN")
+    let locale = locale.replace('_', "-");
+    let mut parts = locale.split('-');
+    let lang = parts.next().unwrap_or("en").to_lowercase();
+
+    if let Some(region) = parts.next() {
+        format!("{}-{}", lang, region.to_uppercase())
+    } else {
+        lang
+    }
 }
 
 #[doc(hidden)]
