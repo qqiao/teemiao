@@ -16,6 +16,7 @@
 
 use clap::Args;
 use log::{debug, info, trace};
+use rust_i18n::t;
 use serde::Serialize;
 use std::path::{PathBuf, absolute};
 use thiserror::Error;
@@ -63,7 +64,12 @@ pub struct BuildInfoCommand {
     ///
     /// If not specified, defaults to `./build_info.json` in the current
     /// working directory.
-    #[arg(default_value = "./build_info.json", value_name = "FILE")]
+    #[arg(
+        default_value = "./build_info.json",
+        value_name = "FILE",
+        help = t!("build_info.out.help"),
+        long_help = t!("build_info.out.long_help"),
+    )]
     out: Option<PathBuf>,
 }
 
@@ -96,14 +102,14 @@ impl BuildInfoCommand {
     /// - JSON serialization fails
     #[allow(clippy::result_large_err)]
     pub fn run(&self) -> Result<(), BuildInfoError> {
-        info!("Generating build info...");
+        info!("{}", t!("log.generating_build_info"));
 
-        trace!("Getting current working directory...");
+        trace!("{}", t!("log.getting_cwd"));
         let cwd = std::env::current_dir()?;
         let cwd = absolute(cwd)?.canonicalize()?;
-        trace!("Current working directory: {}", cwd.display());
+        trace!("{}", t!("log.cwd", path = cwd.display()));
 
-        trace!("Determining output file...");
+        trace!("{}", t!("log.determining_output"));
         // if out is not set, default to ${cwd}/build_info.json
         let out = self.out.clone().unwrap_or_else(|| {
             let mut path = cwd.clone();
@@ -111,35 +117,44 @@ impl BuildInfoCommand {
             path
         });
         let out = absolute(out)?;
-        debug!("Output file: {}", &out.display());
+        debug!("{}", t!("log.output_file", path = out.display()));
 
-        trace!("Opening {} as git repository...", &cwd.display());
+        trace!("{}", t!("log.opening_repo", path = cwd.display()));
         let repo = gix::open(&cwd)?;
-        trace!("Repository opened successfully");
+        trace!("{}", t!("log.repo_opened"));
 
-        trace!("Getting head revision...");
+        trace!("{}", t!("log.getting_head"));
         let head = repo.head()?;
-        trace!("Head obtained successfully: {:?}", head.id());
+        trace!(
+            "{}",
+            t!("log.head_obtained", id = format!("{:?}", head.id()))
+        );
 
-        trace!("Getting short revision for {:?}...", head.id());
+        trace!(
+            "{}",
+            t!("log.getting_short_rev", id = format!("{:?}", head.id()))
+        );
         let revision = head
             .id()
             .ok_or(BuildInfoError::HeadIdNotFound)?
             .shorten()?
             .to_string();
-        trace!("Short revision obtained successfully: {}", revision);
+        trace!("{}", t!("log.short_rev_obtained", revision = revision));
 
         let build_info = BuildInfo {
             revision,
             build_time: chrono::Utc::now().timestamp(),
         };
-        trace!("Build info created successfully: {:?}", build_info);
+        trace!(
+            "{}",
+            t!("log.build_info_created", info = format!("{:?}", build_info))
+        );
 
-        trace!("Writing build info to {}...", &out.display());
+        trace!("{}", t!("log.writing_build_info", path = out.display()));
         // write to file
         let file = std::fs::File::create(out.clone())?;
         serde_json::to_writer_pretty(file, &build_info)?;
-        info!("Build info successfully written to {}", &out.display());
+        info!("{}", t!("log.build_info_written", path = out.display()));
 
         Ok(())
     }
