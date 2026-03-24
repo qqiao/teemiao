@@ -94,8 +94,8 @@ fn detect_locale() -> String {
         return "en".to_string();
     }
 
-    // Strip encoding suffix (e.g. ".UTF-8")
-    let locale = raw.split('.').next().unwrap_or("en");
+    // Strip encoding suffix (e.g. ".UTF-8") and modifier (e.g. "@latin", "@euro")
+    let locale = raw.split(&['.', '@'][..]).next().unwrap_or("en");
 
     // Convert underscore to hyphen (e.g. "zh_CN" -> "zh-CN")
     locale.replace('_', "-")
