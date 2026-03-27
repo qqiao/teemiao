@@ -1,0 +1,6 @@
+# Zed Agent Rules
+
+All project rules are maintained in the `.agents/rules/` directory.
+Read and follow every file in that directory before working on this project:
+
+- `.agents/rules/rust.md` — Rust language conventions, linting, documentation, and project-specific standards.
