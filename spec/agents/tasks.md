@@ -1,0 +1,85 @@
+# Tasks: agents subcommand
+
+All tasks remain pending until T001. Each implementation task uses a failing
+behavior test, the smallest implementation, and a passing verification run.
+Do not alter the specification independently; ask the leader about conflicts.
+
+- [ ] **T001 — Human review of the complete design** (Qian Qiao).
+  Review `spec.md`, `research.md`, `plan.md`, this checklist, and `CONSTRAINTS.md`.
+  Acceptance: explicitly approve implementation or identify changes, especially
+  platforms, PATH-only active-install discovery, and release-channel preservation.
+  Verification: approval recorded on QQ-8. Dependency: none.
+
+- [ ] **T002 [US1] — List the six supported CLI agents** (Coder; medium).
+  Add the clap group, catalog, executable discovery, bounded version/identity
+  probes, and localized output. Keep tests alongside the implementation. Move the
+  existing test module below `main()` to resolve baseline Clippy.
+  Acceptance: all six fixtures listed; absent/duplicate/desktop/unrelated cases
+  handled; hanging/oversized/failed probes do not block or hide other agents.
+  Files: `src/main.rs`, `src/agents/mod.rs`, `src/agents/discovery.rs`, both locales.
+  Verify: `cargo test --locked agents`, full tests, format, strict Clippy.
+  Dependency: T001.
+
+- [ ] **T003 [US2] — Update verified native self-updating agents** (Coder; medium).
+  Add immutable update plans, dry-run, and real process-test fixtures for
+  Antigravity, OpenCode, current Kimi, and Cursor. Recognize unsupported legacy
+  variants; never start a general agent session as an update fallback.
+  Acceptance: exact updater/arguments; dry-run causes zero mutations; failed or
+  manual-only output cannot be reported as a successful update.
+  Files: `src/agents/mod.rs`, `src/agents/update.rs`, `tests/agents_cli.rs`, both locales.
+  Verify: focused unit tests and `cargo test --locked --test agents_cli` with fake
+  tools, including Windows shim and path-metacharacter cases.
+  Dependency: T002.
+
+- [ ] **T004 [US2] — Update the active Codex installation** (Coder; medium).
+  Implement proven npm/Homebrew ownership and standalone installer selection.
+  Add installer download/target validation behind a fakeable boundary; inspect
+  both official platform installers without executing them during development.
+  Acceptance: manager/prefix and native destination remain unchanged; partial
+  downloads and ambiguous ownership launch no installer; post-update discovery
+  selects the active updated launcher. No implicit new installation.
+  Files: discovery/update modules, process tests, and Cargo manifest/lockfile only
+  if a small dependency is justified in the implementation review.
+  Verify: Codex ownership, prefix, download-failure, target-mismatch, and version
+  verification tests; full tests and strict Clippy. Dependency: T003.
+
+- [ ] **T005 [US2] — Update Claude Code through its actual owner** (Coder; medium).
+  Support native, npm, exact Homebrew cask, and proven WinGet installations.
+  Preserve channels and report other managed installs as manual action required.
+  Acceptance: the matching manager alone runs; manager detection is tied to the
+  selected executable; managed no-op success messages cannot mask failure.
+  Files: discovery/update modules, process tests, both locales.
+  Verify: native/npm/Homebrew/WinGet fixtures plus wrong-owner and unavailable
+  manager tests, including channel-specific casks. Dependency: T004.
+
+- [ ] **T006 [US3] — Finish bulk updates and outcome reporting** (Coder; medium).
+  Run the complete detected set sequentially; produce version/result summaries,
+  correct exit codes, and cancellation handling. Cover all single/all dry-runs.
+  Acceptance: one failure does not skip later tools; no absent tool is installed;
+  interruptions stop later updates; unverified/manual results exit nonzero.
+  Files: command/update modules, process tests, both locales.
+  Verify: empty/all/single/partial-failure/zero-exit-manual/cancel/version-change
+  process tests and full delivery checks. Dependency: T005.
+
+- [ ] **T007 — Document and validate platform support** (Coder; medium).
+  Update README and the existing CI workflow with Linux/macOS/Windows tests.
+  Add minimal shared fixtures if required; keep real installers out of all tests.
+  Acceptance: examples and limits match behavior; both locales include new keys;
+  CI exercises supported executable and ownership paths without external agents.
+  Files: `README.md`, `.github/workflows/rust.yml`, `tests/agents_cli.rs`, optional
+  `tests/support/mod.rs`, `spec/agents/tasks.md` for checked-off evidence only.
+  Verify: all commands in `plan.md`; record local platform and outstanding CI.
+  Run the four mandated self-reviews and report findings/resolutions. Dependency: T006.
+
+- [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).
+  Leader reviews code, test quality, security, and requirements coverage. Coder
+  fixes findings under the same standards; repeat until the leader accepts.
+  Open one PR with the requested description, specification links, validation,
+  limitations, and issue reference; report the URL on QQ-8. Do not merge.
+  Acceptance: no unresolved material findings; exact reviewed commit identified;
+  clear evidence for each success criterion. Dependency: T007.
+
+- [ ] **T009 — Human review of the final delivery** (Qian Qiao).
+  Acceptance: leader-validated PR delivered and issue moved to `in_review`;
+  address human feedback before requesting closure. `done` remains human-owned.
+  Verification: PR and review discussion on QQ-8. Dependency: T008.
