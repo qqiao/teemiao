@@ -1,7 +1,8 @@
 # Quality constraints
 
-Proposed for QQ-8, 2026-11-08. Implementation awaits the human's review of
-`spec/agents/`. These constraints apply to the feature diff; they do not authorize
+Approved for QQ-8 by Qian Qiao on 2026-11-08 in comment
+`01a1b7a7-3876-7273-a84b-19ab22057240` ("LGTM"). These constraints apply to the
+feature diff; they do not authorize
 unrelated cleanup or changes to the user's installed agents during development.
 
 ## Floor

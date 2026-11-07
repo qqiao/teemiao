@@ -2,7 +2,7 @@
 
 **Issue:** QQ-8 — agents subcommand
 
-**Status:** Draft for human review; implementation not authorized yet
+**Status:** Approved for implementation by Qian Qiao on 2026-11-08
 
 **Date:** 2026-11-08
 
@@ -13,7 +13,7 @@ or every detected agent through Teemiao. The confirmed catalog is Codex,
 Antigravity, OpenCode, Kimi, Cursor, and Claude Code. All six refer to their
 command-line tools. Desktop applications and editor extensions are excluded.
 
-## Proposed defaults for review
+## Approved defaults
 
 - Support macOS, Linux (including WSL), and native Windows where the upstream
   agent supports that platform.
@@ -161,7 +161,8 @@ credential handling; or downloading arbitrary executables from user input.
 
 ## Approval
 
-The platform, `PATH` discovery, channel-preservation, unsupported-installation
-behavior, and dry-run defaults above are proposed for explicit human review.
-Approval of this package authorizes the coder stage; scope changes return to
-the leader for specification updates.
+Qian Qiao approved this package with "LGTM" in QQ-8 comment
+`01a1b7a7-3876-7273-a84b-19ab22057240`, including the platform, `PATH` discovery,
+channel-preservation, unsupported-installation behavior, and dry-run defaults.
+The coder stage is authorized; scope changes return to the leader for
+specification updates.

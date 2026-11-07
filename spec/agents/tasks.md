@@ -1,14 +1,15 @@
 # Tasks: agents subcommand
 
-All tasks remain pending until T001. Each implementation task uses a failing
+T001 is approved; implementation may proceed. Each implementation task uses a failing
 behavior test, the smallest implementation, and a passing verification run.
 Do not alter the specification independently; ask the leader about conflicts.
 
-- [ ] **T001 — Human review of the complete design** (Qian Qiao).
+- [x] **T001 — Human review of the complete design** (Qian Qiao).
   Review `spec.md`, `research.md`, `plan.md`, this checklist, and `CONSTRAINTS.md`.
   Acceptance: explicitly approve implementation or identify changes, especially
   platforms, PATH-only active-install discovery, and release-channel preservation.
-  Verification: approval recorded on QQ-8. Dependency: none.
+  Verification: Qian Qiao replied "LGTM" on 2026-11-08 in QQ-8 comment
+  `01a1b7a7-3876-7273-a84b-19ab22057240`. Dependency: none.
 
 - [ ] **T002 [US1] — List the six supported CLI agents** (Coder; medium).
   Add the clap group, catalog, executable discovery, bounded version/identity

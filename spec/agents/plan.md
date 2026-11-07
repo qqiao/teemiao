@@ -1,6 +1,6 @@
 # Implementation plan: agents subcommand
 
-**Status:** Proposed alongside the specification; requires human approval.
+**Status:** Approved by Qian Qiao on 2026-11-08; implementation authorized.
 
 **Base:** `main` at `2bf8dbdadb546fef75af3d1ede1814b142e0471c`
 
