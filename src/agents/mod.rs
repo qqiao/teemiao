@@ -1034,7 +1034,10 @@ mod tests {
         .unwrap();
         create_executable(
             &local_bin.join("codex"),
-            "#!/bin/sh\n# .codex/packages/standalone\n",
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                codex_release.join("bin").join("codex").display()
+            ),
         );
         create_executable(&local_bin.join("agy"), "#!/bin/sh\n");
         create_executable(&local_bin.join("opencode"), "#!/bin/sh\n");
@@ -1245,7 +1248,10 @@ mod tests {
         .unwrap();
         create_executable(
             &npm_bin.join("codex"),
-            "#!/usr/bin/env node\n// @openai/codex",
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                npm_pkg_dir.join("bin").join("codex.js").display()
+            ),
         );
         create_executable(&npm_bin.join("npm"), "#!/bin/sh\n");
 
@@ -1299,7 +1305,10 @@ mod tests {
             std::os::unix::fs::symlink(cask_dir.join("codex"), brew_bin_dir.join("codex")).unwrap();
         }
         #[cfg(not(unix))]
-        create_executable(&brew_bin_dir.join("codex"), "#!/bin/sh\n# Caskroom/codex\n");
+        create_executable(
+            &brew_bin_dir.join("codex"),
+            "#!/bin/sh\nexec \"$basedir/../Caskroom/codex/0.10.0/codex\" \"$@\"\n",
+        );
 
         let env_brew = test_env(&[&brew_bin_dir], &home);
         let runner_brew = FakeProcessRunner::new(
@@ -1364,7 +1373,10 @@ mod tests {
         .unwrap();
         create_executable(
             &local_bin.join("codex"),
-            "#!/bin/sh\n# .codex/packages/standalone\n",
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                current_dir.join("bin").join("codex").display()
+            ),
         );
         create_executable(&local_bin.join("curl"), "#!/bin/sh\n");
         create_executable(&local_bin.join("sh"), "#!/bin/sh\n");
@@ -1471,7 +1483,7 @@ mod tests {
         #[cfg(not(unix))]
         create_executable(
             &brew_bin.join("claude"),
-            "#!/bin/sh\n# Caskroom/claude-code@latest\n",
+            "#!/bin/sh\nexec \"$basedir/../Caskroom/claude-code@latest/1.0.20/claude\" \"$@\"\n",
         );
 
         let env_brew = test_env(&[&brew_bin], &home);
@@ -1836,21 +1848,22 @@ mod tests {
             discover_agent(AgentId::Cursor, &env_tools, &runner_bare, &mut cache_tools).is_none()
         );
 
-        // 3. Adjacent `package.json` with `"name": "@cursor/agent"` and bare version `0.48.0` is accepted
+        // 3. Adjacent `package.json` with `"name": "@cursor/agent"` and bare date/hash version `2026.11.05-86047df` is accepted
         let cursor_pkg_dir = tmp.path().join("verified-pkg");
         let cursor_pkg_bin = cursor_pkg_dir.join("bin");
         create_executable(&cursor_pkg_bin.join("agent"), "#!/bin/sh\n");
         fs::write(
             cursor_pkg_dir.join("package.json"),
-            r#"{"name":"@cursor/agent","version":"0.48.0"}"#,
+            r#"{"name":"@cursor/agent","version":"2026.11.05-86047df"}"#,
         )
         .unwrap();
         let env_pkg = test_env(&[&cursor_pkg_bin], &home);
-        let runner_pkg = FakeProcessRunner::new(|_| Ok(ok_output("0.48.0")), |_| unreachable!());
+        let runner_pkg =
+            FakeProcessRunner::new(|_| Ok(ok_output("2026.11.05-86047df")), |_| unreachable!());
         let mut cache_pkg = PackageManagerCache::new();
         let discovered =
             discover_agent(AgentId::Cursor, &env_pkg, &runner_pkg, &mut cache_pkg).unwrap();
-        assert_eq!(discovered.version.as_deref(), Some("0.48.0"));
+        assert_eq!(discovered.version.as_deref(), Some("2026.11.05-86047df"));
     }
 
     #[test]
@@ -1868,7 +1881,13 @@ mod tests {
         fs::create_dir_all(&cask_dir).unwrap();
         create_executable(&other_bin.join("brew"), "#!/bin/sh\n");
         create_executable(&owner_bin.join("brew"), "#!/bin/sh\n");
-        create_executable(&owner_bin.join("codex"), "#!/bin/sh\n# Caskroom/codex\n");
+        create_executable(
+            &owner_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                cask_dir.join("codex").display()
+            ),
+        );
 
         let other_prefix_str = other_prefix.to_string_lossy().into_owned();
         let owner_prefix_str = owner_prefix.to_string_lossy().into_owned();
@@ -1888,7 +1907,7 @@ mod tests {
                     Ok(ok_output("codex 0.118.0"))
                 }
             },
-            |_| Ok(ok_output("Not up to date. Update check failed.")),
+            |_| Ok(ok_output("Warning: ripgrep 14.1.0 is already installed")),
         );
 
         let mut cache = PackageManagerCache::new();
@@ -1901,7 +1920,7 @@ mod tests {
             }
         );
 
-        // 2. Negated updater output "Not up to date. Update check failed." must produce Unverified (exit 1)
+        // 2. Foreign Homebrew message "Warning: ripgrep 14.1.0 is already installed" must produce Unverified (exit 1)
         let cmd = AgentsCommand {
             command: AgentsSubcommand::Update(UpdateArgs {
                 agent: Some(AgentId::Codex),
@@ -1914,5 +1933,49 @@ mod tests {
         assert_eq!(code, 1);
         let out_str = String::from_utf8(stdout).unwrap();
         assert!(out_str.contains("unverified"));
+
+        // 3. Cross-prefix npm wrapper with non-ASCII comments must not authorize updating stale prefix
+        let stale_prefix = tmp.path().join("stale-npm");
+        let active_prefix = tmp.path().join("active-npm");
+        for p in [&stale_prefix, &active_prefix] {
+            let pkg_dir = p
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex");
+            fs::create_dir_all(&pkg_dir).unwrap();
+            fs::write(
+                pkg_dir.join("package.json"),
+                r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+            )
+            .unwrap();
+        }
+        let active_target = active_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex");
+        create_executable(&active_target, "#!/bin/sh\n");
+        let stale_bin = stale_prefix.join("bin");
+        create_executable(&stale_bin.join("npm"), "#!/bin/sh\n");
+        create_executable(
+            &stale_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\n✨ 备注 env node @openai/codex\nexec \"{}\" \"$@\"\n",
+                active_target.display()
+            ),
+        );
+        let env_stale = test_env(&[&stale_bin], &home);
+        let runner_stale =
+            FakeProcessRunner::new(|_| Ok(ok_output("codex-cli 0.118.0")), |_| unreachable!());
+        let mut cache_stale = PackageManagerCache::new();
+        let codex_stale =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_stale).unwrap();
+        assert!(matches!(
+            codex_stale.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
     }
 }

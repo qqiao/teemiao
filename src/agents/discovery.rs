@@ -460,6 +460,8 @@ fn try_verify_cursor_agent(
                 && !output.timed_out
                 && !output.stdout_truncated
                 && let Ok(help_out) = run_bounded_probe(&launcher_path, &["--help"], runner)
+                && help_out.success
+                && !help_out.timed_out
             {
                 let help_text = format!(
                     "{}\n{}",
@@ -560,31 +562,56 @@ fn has_conflicting_non_cursor_product(text: &str) -> bool {
     if contains_cursor_branding(text) {
         return false;
     }
-    for word in text
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|w| !w.is_empty())
-    {
-        let lower = word.to_ascii_lowercase();
-        if !matches!(
-            lower.as_str(),
-            "agent"
-                | "cli"
-                | "version"
-                | "v"
-                | "release"
-                | "build"
-                | "stable"
-                | "beta"
-                | "alpha"
-                | "rc"
-                | "nightly"
-                | "canary"
-                | "preview"
-        ) {
-            return true;
+    for raw_token in text.split_whitespace() {
+        if is_version_or_build_token(raw_token) {
+            continue;
+        }
+        for word in raw_token
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| !w.is_empty())
+        {
+            let lower = word.to_ascii_lowercase();
+            if !matches!(
+                lower.as_str(),
+                "agent"
+                    | "cli"
+                    | "version"
+                    | "v"
+                    | "release"
+                    | "build"
+                    | "stable"
+                    | "beta"
+                    | "alpha"
+                    | "rc"
+                    | "nightly"
+                    | "canary"
+                    | "preview"
+            ) {
+                return true;
+            }
         }
     }
     false
+}
+
+fn is_version_or_build_token(raw_token: &str) -> bool {
+    let trimmed = raw_token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if trimmed.is_empty() {
+        return true;
+    }
+    let without_v = trimmed
+        .strip_prefix("rust-v")
+        .or_else(|| trimmed.strip_prefix('v'))
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    if is_valid_version_token(without_v) {
+        return true;
+    }
+    let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+    has_digit
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
 fn inspect_candidate(
@@ -1728,9 +1755,15 @@ fn detect_npm_ownership(
                 }
                 let canon_pkg_root = canonicalize_clean(&pkg_root);
                 if verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
-                    && (launcher_references_npm_or_node(launcher_path, expected_pkg)
-                        || resolved_path.starts_with(&pkg_root)
-                        || resolved_path.starts_with(&canon_pkg_root))
+                    && (resolved_path.starts_with(&pkg_root)
+                        || resolved_path.starts_with(&canon_pkg_root)
+                        || launcher_targets_npm_pkg_root(
+                            launcher_path,
+                            &pkg_parts,
+                            &prefix_opt,
+                            &pkg_root,
+                            is_windows,
+                        ))
                 {
                     return Some(ManagerSignal::Npm {
                         prefix: prefix_opt,
@@ -1834,17 +1867,176 @@ fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
     false
 }
 
-fn launcher_references_npm_or_node(launcher_path: &Path, expected_pkg: &str) -> bool {
-    let Ok(bytes) = fs::read(launcher_path) else {
+fn read_text_wrapper_sample(launcher_path: &Path) -> Option<String> {
+    let bytes = fs::read(launcher_path).ok()?;
+    let slice = &bytes[..bytes.len().min(8192)];
+    if slice.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(slice).into_owned())
+}
+
+fn launcher_targets_npm_pkg_root(
+    launcher_path: &Path,
+    pkg_parts: &[&str],
+    candidate_prefix: &Path,
+    candidate_pkg_root: &Path,
+    is_windows: bool,
+) -> bool {
+    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
         return false;
     };
-    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
-    let pkg_lower = expected_pkg.to_ascii_lowercase();
-    let pkg_win = pkg_lower.replace('/', "\\");
-    sample.contains("node_modules")
-        || sample.contains(&pkg_lower)
-        || sample.contains(&pkg_win)
-        || sample.contains("env node")
+    let Some(launcher_dir) = launcher_path.parent() else {
+        return false;
+    };
+    let mut matched_candidate = false;
+    for line in sample.lines() {
+        let trimmed = line.trim();
+        if is_wrapper_comment_or_empty_line(trimmed) {
+            continue;
+        }
+        for token in extract_command_tokens(trimmed) {
+            if !token.to_ascii_lowercase().contains("node_modules") {
+                continue;
+            }
+            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
+            if let Some((target_prefix, target_pkg_root)) =
+                extract_npm_prefix_from_node_modules(&resolved_token, pkg_parts)
+            {
+                if paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows)
+                    && paths_refer_to_same_dir(&target_pkg_root, candidate_pkg_root, is_windows)
+                {
+                    matched_candidate = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    matched_candidate
+}
+
+fn is_wrapper_comment_or_empty_line(trimmed: &str) -> bool {
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("::")
+        || trimmed.eq_ignore_ascii_case("rem")
+        || trimmed.eq_ignore_ascii_case("@rem")
+    {
+        return true;
+    }
+    let without_at = trimmed.strip_prefix('@').unwrap_or(trimmed).trim_start();
+    without_at
+        .get(..3)
+        .is_some_and(|p| p.eq_ignore_ascii_case("rem"))
+        && without_at
+            .get(3..)
+            .is_some_and(|r| r.starts_with(char::is_whitespace))
+}
+
+fn extract_command_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match in_quote {
+            Some(q) => {
+                if c == q {
+                    in_quote = None;
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                } else if c == '\\' && q == '"' {
+                    if let Some(&next_c) = chars.peek()
+                        && matches!(next_c, '"' | '\\' | '$')
+                    {
+                        current.push(chars.next().unwrap());
+                    } else {
+                        current.push(c);
+                    }
+                } else {
+                    current.push(c);
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                    in_quote = Some(c);
+                } else if c.is_whitespace() {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                } else if c == '\\' {
+                    if let Some(&next_c) = chars.peek()
+                        && (next_c.is_whitespace() || matches!(next_c, '"' | '\''))
+                    {
+                        current.push(chars.next().unwrap());
+                    } else {
+                        current.push(c);
+                    }
+                } else {
+                    current.push(c);
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn resolve_wrapper_path_token(raw_token: &str, launcher_dir: &Path) -> PathBuf {
+    let normalized = raw_token.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let dir_str = launcher_dir.to_string_lossy().replace('\\', "/");
+    let dir_trimmed = dir_str.trim_end_matches('/');
+
+    let prefixes = [
+        "$basedir/",
+        "${basedir}/",
+        "%~dp0/",
+        "%~dp0",
+        "%dp0%/",
+        "%dp0%",
+        "$(dirname \"$0\")/",
+        "$(dirname $0)/",
+    ];
+    let mut expanded = normalized.clone();
+    for p in prefixes {
+        if lower.starts_with(p) {
+            let rest = normalized[p.len()..].trim_start_matches('/');
+            expanded = format!("{dir_trimmed}/{rest}");
+            break;
+        }
+    }
+
+    let candidate_path = Path::new(&expanded);
+    let joined = if candidate_path.is_absolute() || expanded.starts_with('/') {
+        PathBuf::from(&expanded)
+    } else {
+        launcher_dir.join(candidate_path)
+    };
+    normalize_lexical_path(&joined)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Detects Homebrew Caskroom or Cellar ownership tied to `launcher_path` or `resolved_path`.
@@ -1893,7 +2085,7 @@ fn detect_homebrew_ownership(
             .file_name()
             .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
         && let Some(prefix) = bin_dir.parent()
-        && launcher_references_homebrew(launcher_path)
+        && launcher_references_homebrew(launcher_path, prefix, env.is_windows)
     {
         let caskroom = prefix.join("Caskroom");
         if caskroom.is_dir() {
@@ -1917,12 +2109,42 @@ fn detect_homebrew_ownership(
     out
 }
 
-fn launcher_references_homebrew(launcher_path: &Path) -> bool {
-    let Ok(bytes) = fs::read(launcher_path) else {
+fn launcher_references_homebrew(
+    launcher_path: &Path,
+    candidate_prefix: &Path,
+    is_windows: bool,
+) -> bool {
+    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
         return false;
     };
-    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
-    sample.contains("caskroom") || sample.contains("cellar") || sample.contains("homebrew")
+    let Some(launcher_dir) = launcher_path.parent() else {
+        return false;
+    };
+    let mut matched = false;
+    for line in sample.lines() {
+        let trimmed = line.trim();
+        if is_wrapper_comment_or_empty_line(trimmed) {
+            continue;
+        }
+        for token in extract_command_tokens(trimmed) {
+            let lower = token.to_ascii_lowercase();
+            if !lower.contains("caskroom") && !lower.contains("cellar") {
+                continue;
+            }
+            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
+            if let Some((target_prefix, _)) =
+                extract_homebrew_dir_token(&resolved_token, "Caskroom")
+                    .or_else(|| extract_homebrew_dir_token(&resolved_token, "Cellar"))
+            {
+                if paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows) {
+                    matched = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    matched
 }
 
 fn extract_homebrew_dir_token(path: &Path, marker_dir: &str) -> Option<(PathBuf, String)> {
@@ -2105,7 +2327,8 @@ fn detect_codex_standalone_ownership(
             && bin_dir.join("rg.exe").is_file();
         if let Some(expected_bin) = env.expected_codex_bin_dir()
             && paths_refer_to_same_dir(&bin_dir, &expected_bin, env.is_windows)
-            && (launcher_references_codex_standalone(launcher_path) || has_windows_companion)
+            && (launcher_references_codex_standalone(launcher_path, &codex_home, env.is_windows)
+                || has_windows_companion)
         {
             return Some(ManagerSignal::CodexStandalone {
                 bin_dir,
@@ -2117,14 +2340,39 @@ fn detect_codex_standalone_ownership(
     None
 }
 
-fn launcher_references_codex_standalone(launcher_path: &Path) -> bool {
-    let Ok(bytes) = fs::read(launcher_path) else {
+fn launcher_references_codex_standalone(
+    launcher_path: &Path,
+    codex_home: &Path,
+    is_windows: bool,
+) -> bool {
+    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
         return false;
     };
-    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
-    sample.contains("packages/standalone")
-        || sample.contains("packages\\standalone")
-        || sample.contains("codex-package.json")
+    let Some(launcher_dir) = launcher_path.parent() else {
+        return false;
+    };
+    let mut matched = false;
+    for line in sample.lines() {
+        let trimmed = line.trim();
+        if is_wrapper_comment_or_empty_line(trimmed) {
+            continue;
+        }
+        for token in extract_command_tokens(trimmed) {
+            let lower = token.to_ascii_lowercase().replace('\\', "/");
+            if !lower.contains("packages/standalone") {
+                continue;
+            }
+            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
+            if let Some((target_codex_home, _)) = extract_codex_standalone_root(&resolved_token) {
+                if paths_refer_to_same_dir(&target_codex_home, codex_home, is_windows) {
+                    matched = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    matched
 }
 
 fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {

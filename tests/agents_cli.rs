@@ -1328,4 +1328,225 @@ fn agents_update_rejects_negated_error_or_unrelated_up_to_date_messages() {
         stdout_dep.contains("unverified"),
         "'Dependencies are up to date' must be reported as unverified: {stdout_dep}"
     );
+
+    // 3. "Not already up to date; update aborted." must be unverified (exit 1)
+    sb.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("update_stdout", "Not already up to date; update aborted."),
+        ],
+    );
+    let out_abort = sb.run_teemiao(&["agents", "update", "antigravity"], &[&sb.bin_dir], &[]);
+    assert_eq!(out_abort.status.code(), Some(1));
+    let stdout_abort = String::from_utf8_lossy(&out_abort.stdout);
+    assert!(
+        stdout_abort.contains("unverified"),
+        "'Not already up to date; update aborted.' must be reported as unverified: {stdout_abort}"
+    );
+
+    // 4. Homebrew updater printing "Warning: ripgrep 14.1.0 is already installed" for Codex must be unverified (exit 1)
+    let sb_brew = TestSandbox::new();
+    let brew_prefix = sb_brew.root.join("brew");
+    let brew_bin = brew_prefix.join("bin");
+    let cask_dir = brew_prefix.join("Caskroom").join("codex").join("0.118.0");
+    fs::create_dir_all(&cask_dir).unwrap();
+    fs::create_dir_all(&brew_bin).unwrap();
+    let (cask_codex, _) = sb_brew.install_fake_tool_in(
+        &cask_dir,
+        "codex",
+        &[("version_stdout", "codex-cli 0.118.0")],
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cask_codex, brew_bin.join("codex")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            brew_bin.join("codex.cmd"),
+            format!("@echo off\r\n\"{}\" %*\r\n", cask_codex.display()),
+        )
+        .unwrap();
+    }
+    sb_brew.install_fake_tool_in(
+        &brew_bin,
+        "brew",
+        &[
+            ("prefix_stdout", &brew_prefix.to_string_lossy()),
+            ("list_stdout", "codex"),
+            (
+                "update_stdout",
+                "Warning: ripgrep 14.1.0 is already installed",
+            ),
+        ],
+    );
+    let out_brew = sb_brew.run_teemiao(&["agents", "update", "codex"], &[&brew_bin], &[]);
+    assert_eq!(out_brew.status.code(), Some(1));
+    let stdout_brew = String::from_utf8_lossy(&out_brew.stdout);
+    assert!(
+        stdout_brew.contains("unverified"),
+        "foreign 'ripgrep is already installed' message must not report Codex up to date: {stdout_brew}"
+    );
+}
+
+#[test]
+fn agents_cursor_accepts_date_hash_versions_and_prefers_verified_primary_over_older_alias() {
+    let sb = TestSandbox::new();
+    let version_dir = sb
+        .home
+        .join(".local")
+        .join("share")
+        .join("cursor-agent")
+        .join("versions")
+        .join("2026.11.05-86047df");
+    fs::create_dir_all(&version_dir).unwrap();
+    let (target_agent, _) = sb.install_fake_tool_in(
+        &version_dir,
+        "agent",
+        &[
+            ("version_stdout", "2026.11.05-86047df"),
+            ("help_stdout", "Start the Cursor Agent"),
+        ],
+    );
+    #[cfg(unix)]
+    {
+        let link_path = sb.bin_dir.join("agent");
+        let _ = fs::remove_file(&link_path);
+        std::os::unix::fs::symlink(&target_agent, &link_path).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        sb.install_fake_tool(
+            "agent",
+            &[
+                ("version_stdout", "2026.11.05-86047df"),
+                ("help_stdout", "Start the Cursor Agent"),
+            ],
+        );
+    }
+
+    // Without alias: `agent` with date/hash version `2026.11.05-86047df` is verified
+    let out1 = sb.run_teemiao(
+        &["agents", "update", "cursor", "--dry-run"],
+        &[&sb.bin_dir],
+        &[],
+    );
+    assert_eq!(out1.status.code(), Some(0));
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(
+        stdout1.contains("would run: agent update") && stdout1.contains("2026.11.05-86047df"),
+        "expected verified primary 'agent update' with 2026.11.05-86047df, got: {stdout1}"
+    );
+
+    // With older `cursor-agent` alias also present in `bin_dir`: primary `agent` still wins
+    sb.install_fake_tool(
+        "cursor-agent",
+        &[("version_stdout", "Cursor Agent 2026.01.01-old")],
+    );
+    let out2 = sb.run_teemiao(
+        &["agents", "update", "cursor", "--dry-run"],
+        &[&sb.bin_dir],
+        &[],
+    );
+    assert_eq!(out2.status.code(), Some(0));
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout2.contains("would run: agent update") && stdout2.contains("2026.11.05-86047df"),
+        "verified primary 'agent' must take precedence over older 'cursor-agent': {stdout2}"
+    );
+}
+
+#[test]
+fn agents_npm_wrapper_rejects_other_prefix_target_and_generic_node_comment() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 1. Wrapper in `stale/bin/codex` executing `active/lib/node_modules/@openai/codex/bin/codex`
+        let sb = TestSandbox::new();
+        let active_prefix = sb.root.join("active");
+        let stale_prefix = sb.root.join("stale");
+        for prefix in [&active_prefix, &stale_prefix] {
+            let pkg_dir = prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex");
+            fs::create_dir_all(&pkg_dir).unwrap();
+            fs::write(
+                pkg_dir.join("package.json"),
+                r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+            )
+            .unwrap();
+        }
+        let active_bin_dir = active_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        let (active_codex, _) = sb.install_fake_tool_in(
+            &active_bin_dir,
+            "codex",
+            &[("version_stdout", "codex-cli 0.118.0")],
+        );
+        let stale_bin = stale_prefix.join("bin");
+        fs::create_dir_all(&stale_bin).unwrap();
+        let wrapper_path = stale_bin.join("codex");
+        fs::write(
+            &wrapper_path,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", active_codex.display()),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&wrapper_path, perms).unwrap();
+        sb.install_fake_tool_in(&stale_bin, "npm", &[("update_stdout", "added 1 package")]);
+
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&stale_bin],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("manual action required"),
+            "wrapper in stale/bin targeting active/lib/node_modules must not authorize updating stale prefix: {stdout}"
+        );
+
+        // 2. Unrelated wrapper in `prefix/bin/codex` with `# unrelated wrapper: env node` comment
+        let sb2 = TestSandbox::new();
+        let prefix2 = sb2.root.join("prefix");
+        let pkg2 = prefix2
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        fs::create_dir_all(&pkg2).unwrap();
+        fs::write(
+            pkg2.join("package.json"),
+            r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+        )
+        .unwrap();
+        let bin2 = prefix2.join("bin");
+        fs::create_dir_all(&bin2).unwrap();
+        let wrapper2 = bin2.join("codex");
+        fs::write(
+            &wrapper2,
+            "#!/bin/sh\n# unrelated wrapper: env node\necho \"codex-cli 0.118.0\"\n",
+        )
+        .unwrap();
+        let mut perms2 = fs::metadata(&wrapper2).unwrap().permissions();
+        perms2.set_mode(0o755);
+        fs::set_permissions(&wrapper2, perms2).unwrap();
+        sb2.install_fake_tool_in(&bin2, "npm", &[("update_stdout", "added 1 package")]);
+
+        let out2 = sb2.run_teemiao(&["agents", "update", "codex", "--dry-run"], &[&bin2], &[]);
+        assert_eq!(out2.status.code(), Some(1));
+        let stdout2 = String::from_utf8_lossy(&out2.stdout);
+        assert!(
+            stdout2.contains("manual action required"),
+            "unrelated wrapper with 'env node' comment must not authorize npm update: {stdout2}"
+        );
+    }
 }

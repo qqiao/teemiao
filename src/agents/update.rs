@@ -854,8 +854,22 @@ fn updater_output_has_negation_or_failure(text: &str) -> bool {
     let negative_markers = [
         "not up to date",
         "not up-to-date",
+        "not already up to date",
+        "not already up-to-date",
         "isn't up to date",
+        "isn't already up to date",
         "is not up to date",
+        "is not already up to date",
+        "not on the latest",
+        "not at the latest",
+        "not running the latest",
+        "not the latest",
+        "update aborted",
+        "upgrade aborted",
+        "aborted",
+        "aborting",
+        "cancelled",
+        "canceled",
         "update check failed",
         "check failed",
         "update failed",
@@ -866,10 +880,66 @@ fn updater_output_has_negation_or_failure(text: &str) -> bool {
         "error ",
         "fatal:",
         "cannot ",
+        "can't ",
         "could not ",
+        "couldn't ",
         "unable to ",
     ];
     negative_markers.iter().any(|m| lower.contains(m))
+}
+
+fn line_has_negation_token(line_lower: &str) -> bool {
+    for word in line_lower.split(|c: char| !c.is_ascii_alphabetic() && c != '\'') {
+        if matches!(
+            word,
+            "not"
+                | "never"
+                | "isn't"
+                | "aren't"
+                | "wasn't"
+                | "weren't"
+                | "didn't"
+                | "doesn't"
+                | "won't"
+                | "abort"
+                | "aborted"
+                | "aborting"
+                | "cancel"
+                | "cancelled"
+                | "canceled"
+                | "fail"
+                | "failed"
+                | "failure"
+                | "error"
+                | "fatal"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn line_mentions_token(line_lower: &str, token_lower: &str) -> bool {
+    if token_lower.is_empty() {
+        return false;
+    }
+    for (idx, _) in line_lower.match_indices(token_lower) {
+        let before_ok = idx == 0
+            || !line_lower[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'));
+        let after_idx = idx + token_lower.len();
+        let after_ok = after_idx == line_lower.len()
+            || !line_lower[after_idx..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'));
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 fn line_has_unrelated_up_to_date_subject(line_lower: &str) -> bool {
@@ -891,6 +961,8 @@ fn line_has_unrelated_up_to_date_subject(line_lower: &str) -> bool {
         line_lower.starts_with(subj)
             || line_lower.contains(&format!("{subj} are up to date"))
             || line_lower.contains(&format!("{subj} is up to date"))
+            || line_lower.contains(&format!("{subj} is already"))
+            || line_lower.contains(&format!("warning: {subj} "))
     })
 }
 
@@ -923,35 +995,46 @@ fn updater_output_confirms_up_to_date(
                     "no update available",
                     "no updates available",
                 ];
-                NATIVE_MARKERS.iter().any(|m| line.contains(m))
+                !line_has_negation_token(&line) && NATIVE_MARKERS.iter().any(|m| line.contains(m))
             }
             UpdateOwner::NpmGlobal { .. } => {
-                line.contains("up to date")
-                    || line.contains("up-to-date")
-                    || line.contains("changed 0 packages")
+                !line_has_negation_token(&line)
+                    && (line.contains("up to date")
+                        || line.contains("up-to-date")
+                        || line.contains("changed 0 packages"))
             }
             UpdateOwner::HomebrewCask { cask_token, .. } => {
                 let cask_lower = cask_token.to_ascii_lowercase();
-                line.contains(&format!("{cask_lower} {ver_lower} is already installed"))
-                    || line.contains("already installed and up-to-date")
-                    || line.contains("already installed")
-                    || line.contains("not upgraded")
+                line_mentions_token(&line, &cask_lower)
+                    && (line.contains(&format!("{cask_lower} {ver_lower} is already installed"))
+                        || line.contains("already installed and up-to-date")
+                        || line.contains("already installed")
+                        || line.contains("up-to-date")
+                        || line.contains("up to date")
+                        || line.contains("not upgraded"))
             }
             UpdateOwner::HomebrewFormula { formula, .. } => {
                 let formula_lower = formula.to_ascii_lowercase();
-                line.contains(&format!("{formula_lower} {ver_lower} already installed"))
-                    || line.contains("already installed and up-to-date")
-                    || line.contains("already installed")
-                    || line.contains("not upgraded")
+                line_mentions_token(&line, &formula_lower)
+                    && (line.contains(&format!("{formula_lower} {ver_lower} already installed"))
+                        || line.contains("already installed and up-to-date")
+                        || line.contains("already installed")
+                        || line.contains("up-to-date")
+                        || line.contains("up to date")
+                        || line.contains("not upgraded"))
             }
             UpdateOwner::WinGet { .. } => {
-                line.contains("no available upgrade found")
-                    || line.contains("no newer package versions are available")
+                !line_has_negation_token(&line)
+                    && (line.contains("no available upgrade found")
+                        || line.contains("no newer package versions are available"))
             }
             UpdateOwner::CodexStandalone { .. } => {
-                line.contains(&format!("codex cli {ver_lower} installed successfully"))
-                    || line.contains("already up to date")
-                    || line.contains("already installed")
+                !line_has_negation_token(&line)
+                    && (line.contains(&format!("codex cli {ver_lower} installed successfully"))
+                        || (line_mentions_token(&line, "codex")
+                            && (line.contains("already up to date")
+                                || line.contains("already installed")))
+                        || line.starts_with("already up to date"))
             }
             UpdateOwner::ManualActionRequired { .. } => false,
         };
