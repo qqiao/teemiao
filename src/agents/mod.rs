@@ -309,7 +309,7 @@ impl RealProcessRunner {
             program: request.program.clone(),
             source,
         })?;
-        let child_pid = child.id();
+        let child_group = ChildProcessGroup::attach(&child, request.timeout.is_some());
 
         let stdout_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
         let stderr_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
@@ -345,7 +345,7 @@ impl RealProcessRunner {
                     Ok(None) => {
                         if start.elapsed() >= limit {
                             timed_out = true;
-                            terminate_timed_out_child(&mut child, child_pid);
+                            terminate_timed_out_child(&mut child, &child_group);
                             let status = child.wait().map_err(|source| ProcessError::Io {
                                 program: request.program.clone(),
                                 source,
@@ -355,7 +355,7 @@ impl RealProcessRunner {
                         thread::sleep(Duration::from_millis(10));
                     }
                     Err(source) => {
-                        terminate_timed_out_child(&mut child, child_pid);
+                        terminate_timed_out_child(&mut child, &child_group);
                         let _ = child.wait();
                         return Err(ProcessError::Io {
                             program: request.program.clone(),
@@ -373,7 +373,7 @@ impl RealProcessRunner {
                     if elapsed >= limit {
                         timed_out = true;
                         drop(done);
-                        terminate_timed_out_child(&mut child, child_pid);
+                        terminate_timed_out_child(&mut child, &child_group);
                         break;
                     }
                     let remaining = limit - elapsed;
@@ -384,7 +384,7 @@ impl RealProcessRunner {
                     if wait_res.timed_out() && *done < expected_readers {
                         timed_out = true;
                         drop(done);
-                        terminate_timed_out_child(&mut child, child_pid);
+                        terminate_timed_out_child(&mut child, &child_group);
                         break;
                     }
                 }
@@ -439,30 +439,218 @@ impl RealProcessRunner {
     }
 }
 
-fn terminate_timed_out_child(child: &mut std::process::Child, child_pid: u32) {
-    let _ = child.kill();
+struct ChildProcessGroup {
+    child_pid: u32,
+    #[cfg(windows)]
+    job_handle: *mut std::ffi::c_void,
+}
+
+impl ChildProcessGroup {
+    fn attach(child: &std::process::Child, has_timeout: bool) -> Self {
+        let child_pid = child.id();
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let job_handle = if has_timeout {
+                win_process_tree::create_and_assign_job(child.as_raw_handle())
+            } else {
+                std::ptr::null_mut()
+            };
+            Self {
+                child_pid,
+                job_handle,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = has_timeout;
+            Self { child_pid }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ChildProcessGroup {
+    fn drop(&mut self) {
+        win_process_tree::close_job(self.job_handle);
+    }
+}
+
+fn terminate_timed_out_child(child: &mut std::process::Child, group: &ChildProcessGroup) {
     #[cfg(unix)]
-    if child_pid > 1 {
-        let neg_pgid = format!("-{child_pid}");
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", &neg_pgid])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    {
+        let _ = child.kill();
+        if group.child_pid > 1 {
+            let neg_pgid = format!("-{}", group.child_pid);
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &neg_pgid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
     #[cfg(windows)]
-    if child_pid > 0 {
-        let pid_str = child_pid.to_string();
-        let _ = Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid_str])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    {
+        win_process_tree::terminate_job_and_tree(child, group.job_handle, group.child_pid);
     }
     #[cfg(not(any(unix, windows)))]
-    let _ = child_pid;
+    {
+        let _ = child.kill();
+        let _ = group.child_pid;
+    }
+}
+
+#[cfg(windows)]
+mod win_process_tree {
+    use std::collections::BTreeSet;
+    use std::ffi::c_void;
+    use std::ptr;
+
+    type Handle = *mut c_void;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [u16; 260],
+    }
+
+    unsafe extern "system" {
+        fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> Handle;
+        fn AssignProcessToJobObject(h_job: Handle, h_process: Handle) -> i32;
+        fn TerminateJobObject(h_job: Handle, u_exit_code: u32) -> i32;
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> Handle;
+        fn Process32FirstW(h_snapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(h_snapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32)
+        -> Handle;
+        fn TerminateProcess(h_process: Handle, u_exit_code: u32) -> i32;
+        fn WaitForSingleObject(h_handle: Handle, dw_milliseconds: u32) -> u32;
+        fn CloseHandle(h_object: Handle) -> i32;
+    }
+
+    pub(super) fn create_and_assign_job(process_handle: Handle) -> Handle {
+        // SAFETY: Creates an unnamed Win32 Job Object and assigns the valid child process handle to it.
+        unsafe {
+            let job = CreateJobObjectW(ptr::null(), ptr::null());
+            if job.is_null() {
+                return ptr::null_mut();
+            }
+            if AssignProcessToJobObject(job, process_handle) == 0 {
+                let _ = CloseHandle(job);
+                return ptr::null_mut();
+            }
+            job
+        }
+    }
+
+    pub(super) fn close_job(job_handle: Handle) {
+        if !job_handle.is_null() {
+            // SAFETY: Closes a valid Job Object handle created by `CreateJobObjectW`.
+            unsafe {
+                let _ = CloseHandle(job_handle);
+            }
+        }
+    }
+
+    pub(super) fn terminate_job_and_tree(
+        child: &mut std::process::Child,
+        job_handle: Handle,
+        root_pid: u32,
+    ) {
+        let handles = open_descendant_handles(root_pid);
+        if !job_handle.is_null() {
+            // SAFETY: Terminates all processes associated with the valid Job Object handle.
+            unsafe {
+                let _ = TerminateJobObject(job_handle, 1);
+            }
+        }
+        let _ = child.kill();
+        for &h in &handles {
+            // SAFETY: `h` is a valid process handle opened with `PROCESS_TERMINATE | SYNCHRONIZE`.
+            unsafe {
+                let _ = TerminateProcess(h, 1);
+            }
+        }
+        for h in handles {
+            // SAFETY: Waits briefly for kernel process rundown so inherited pipes close before returning.
+            unsafe {
+                let _ = WaitForSingleObject(h, 500);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
+    fn open_descendant_handles(root_pid: u32) -> Vec<Handle> {
+        if root_pid == 0 {
+            return Vec::new();
+        }
+        let self_pid = std::process::id();
+        let mut pairs = Vec::new();
+        // SAFETY: Takes a point-in-time process snapshot and iterates with a properly sized `ProcessEntry32W`.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                return Vec::new();
+            }
+            let mut entry: ProcessEntry32W = std::mem::zeroed();
+            entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+            if Process32FirstW(snap, &mut entry) != 0 {
+                loop {
+                    pairs.push((entry.th32_process_id, entry.th32_parent_process_id));
+                    if Process32NextW(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snap);
+        }
+
+        let mut tree_pids = BTreeSet::from([root_pid]);
+        loop {
+            let mut added = false;
+            for &(pid, ppid) in &pairs {
+                if pid != 0
+                    && pid != self_pid
+                    && tree_pids.contains(&ppid)
+                    && !tree_pids.contains(&pid)
+                {
+                    tree_pids.insert(pid);
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        let mut handles = Vec::new();
+        for pid in tree_pids {
+            if pid == self_pid {
+                continue;
+            }
+            // SAFETY: Opens a process handle for termination and synchronization if the PID is still active.
+            unsafe {
+                let h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, pid);
+                if !h.is_null() {
+                    handles.push(h);
+                }
+            }
+        }
+        handles
+    }
 }
 
 fn spawn_bounded_reader<R: Read + Send + 'static>(

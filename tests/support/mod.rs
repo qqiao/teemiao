@@ -88,6 +88,11 @@ fn main() -> ExitCode {
     let is_prefix = args.iter().any(|a| a == "--prefix") && !args.iter().any(|a| a == "install");
 
     if is_version {
+        if let Some(p_file) = cfg.get("parent_pid_file") {
+            if !p_file.is_empty() {
+                let _ = fs::write(p_file, format!("{}", std::process::id()));
+            }
+        }
         if let Some(hold_ms) = cfg.get("spawn_hold_pipes_ms") {
             let pid_file = cfg.get("hold_pid_file").map(String::as_str).unwrap_or("");
             let _ = Command::new(&exe_path)
@@ -394,25 +399,7 @@ impl TestSandbox {
             cmd.env(k, v);
         }
 
-        let run_seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
-        let stdout_path = self.root.join(format!(".teemiao_stdout_{run_seq}.tmp"));
-        let stderr_path = self.root.join(format!(".teemiao_stderr_{run_seq}.tmp"));
-        let stdout_file = fs::File::create(&stdout_path).expect("create stdout capture file");
-        let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture file");
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(stdout_file))
-            .stderr(std::process::Stdio::from(stderr_file));
-
-        let status = cmd.status().expect("spawn teemiao binary");
-        let stdout = fs::read(&stdout_path).unwrap_or_default();
-        let stderr = fs::read(&stderr_path).unwrap_or_default();
-        let _ = fs::remove_file(&stdout_path);
-        let _ = fs::remove_file(&stderr_path);
-        Output {
-            status,
-            stdout,
-            stderr,
-        }
+        cmd.output().expect("spawn teemiao binary")
     }
 
     /// Reads all recorded fake tool invocations from `invocations.log`.

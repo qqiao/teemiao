@@ -1259,10 +1259,89 @@ fn agents_rejects_unrelated_launchers_with_nearby_npm_standalone_or_homebrew_met
     );
 }
 
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        for _ in 0..10 {
+            let status = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if !status.is_ok_and(|s| s.success()) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+    #[cfg(windows)]
+    {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        unsafe extern "system" {
+            fn OpenProcess(
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_process_id: u32,
+            ) -> *mut std::ffi::c_void;
+            fn WaitForSingleObject(h_handle: *mut std::ffi::c_void, dw_milliseconds: u32) -> u32;
+            fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
+        }
+        // SAFETY: Standard Win32 kernel32 process query using a valid process ID and closing the handle immediately.
+        unsafe {
+            let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let wait_rc = WaitForSingleObject(handle, 0);
+            let _ = CloseHandle(handle);
+            wait_rc == WAIT_TIMEOUT
+        }
+    }
+}
+
+fn kill_process_best_effort(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+struct PidFileCleanupGuard(std::path::PathBuf);
+
+impl Drop for PidFileCleanupGuard {
+    fn drop(&mut self) {
+        if let Ok(text) = fs::read_to_string(&self.0)
+            && let Some(line) = text.trim().lines().next()
+            && let Ok(pid) = line.trim().parse::<u32>()
+        {
+            kill_process_best_effort(pid);
+        }
+    }
+}
+
 #[test]
 fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
+    // Case 1: Parent exits immediately while its spawned descendant keeps stdout/stderr pipes open
     let sb = TestSandbox::new();
-    let pid_file = sb.root.join("grandchild.pid");
+    let pid_file = sb.root.join("grandchild-immediate.pid");
+    let _cleanup_immediate = PidFileCleanupGuard(pid_file.clone());
     sb.install_fake_tool(
         "agy",
         &[
@@ -1279,7 +1358,7 @@ fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
     assert_eq!(out.status.code(), Some(0));
     assert!(
         elapsed < std::time::Duration::from_millis(6500),
-        "probe with pipe-holding child must be bounded by the 5s deadline, took {elapsed:?}"
+        "probe with pipe-holding child (parent exited immediately) must be bounded by the 5s deadline, took {elapsed:?}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1291,15 +1370,88 @@ fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
         stderr.contains("timed out after 5s"),
         "timed-out pipe-holding probe must emit timeout warning: {stderr}"
     );
-    #[cfg(windows)]
-    if let Ok(pid_text) = fs::read_to_string(&pid_file)
-        && let Some(pid) = pid_text.trim().lines().next()
-        && !pid.is_empty()
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/PID", pid])
-            .status();
+
+    let grandchild_pid: u32 = fs::read_to_string(&pid_file)
+        .expect("grandchild pid file must be written")
+        .trim()
+        .parse()
+        .expect("valid grandchild pid");
+    let alive_after_immediate = is_process_alive(grandchild_pid);
+    if alive_after_immediate {
+        kill_process_best_effort(grandchild_pid);
     }
+    assert!(
+        !alive_after_immediate,
+        "descendant PID {grandchild_pid} (parent exited immediately) survived production timeout cleanup"
+    );
+}
+
+#[test]
+fn agents_probe_timeout_terminates_running_parent_and_descendant() {
+    // Parent is still running at the 5s deadline AND spawned a pipe-holding descendant
+    let sb_running = TestSandbox::new();
+    let parent_pid_file = sb_running.root.join("parent-running.pid");
+    let pid_file_running = sb_running.root.join("grandchild-running.pid");
+    let _cleanup_parent = PidFileCleanupGuard(parent_pid_file.clone());
+    let _cleanup_running = PidFileCleanupGuard(pid_file_running.clone());
+    sb_running.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("parent_pid_file", &parent_pid_file.to_string_lossy()),
+            ("version_sleep_ms", "8000"),
+            ("spawn_hold_pipes_ms", "8000"),
+            ("hold_pid_file", &pid_file_running.to_string_lossy()),
+        ],
+    );
+
+    let start_running = std::time::Instant::now();
+    let out_running = sb_running.run_teemiao(&["agents", "list"], &[&sb_running.bin_dir], &[]);
+    let elapsed_running = start_running.elapsed();
+
+    assert_eq!(out_running.status.code(), Some(0));
+    assert!(
+        elapsed_running < std::time::Duration::from_millis(6500),
+        "probe with still-running parent and pipe-holding descendant must be bounded by the 5s deadline, took {elapsed_running:?}"
+    );
+    let stdout_running = String::from_utf8_lossy(&out_running.stdout);
+    let stderr_running = String::from_utf8_lossy(&out_running.stderr);
+    assert!(
+        stdout_running.contains("Antigravity (antigravity) | version: unknown"),
+        "timed-out still-running probe must report version unknown: {stdout_running}"
+    );
+    assert!(
+        stderr_running.contains("timed out after 5s"),
+        "timed-out still-running probe must emit timeout warning: {stderr_running}"
+    );
+
+    let parent_pid: u32 = fs::read_to_string(&parent_pid_file)
+        .expect("parent-running pid file must be written")
+        .trim()
+        .parse()
+        .expect("valid parent-running pid");
+    let grandchild_running_pid: u32 = fs::read_to_string(&pid_file_running)
+        .expect("grandchild-running pid file must be written")
+        .trim()
+        .parse()
+        .expect("valid grandchild-running pid");
+
+    let parent_alive = is_process_alive(parent_pid);
+    let grandchild_alive = is_process_alive(grandchild_running_pid);
+    if parent_alive {
+        kill_process_best_effort(parent_pid);
+    }
+    if grandchild_alive {
+        kill_process_best_effort(grandchild_running_pid);
+    }
+    assert!(
+        !parent_alive,
+        "still-running parent PID {parent_pid} survived production timeout cleanup"
+    );
+    assert!(
+        !grandchild_alive,
+        "descendant PID {grandchild_running_pid} (still-running parent) survived production timeout cleanup"
+    );
 }
 
 #[test]
