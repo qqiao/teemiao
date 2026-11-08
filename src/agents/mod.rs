@@ -3496,7 +3496,8 @@ fn main() -> ExitCode {
                 "list output must degrade to version unknown on job setup error: {list_out}"
             );
             assert!(
-                list_err.contains("probe failed"),
+                list_err.contains("version probe for Antigravity")
+                    && list_err.contains("failed (failed to execute"),
                 "stderr must report probe failure when job setup fails: {list_err}"
             );
         }
