@@ -80,7 +80,7 @@ Do not alter the specification independently; ask the leader about conflicts.
   empty `PATH` no-op (`0`), partial-failure continuation (`1`), cancellation stop
   (`130`), and `en`/`zh-CN` localized output. Dependency: T005.
 
-- [ ] **T007 — Document and validate platform support** (Coder; medium).
+- [x] **T007 — Document and validate platform support** (Coder; medium).
   Update README and the existing CI workflow with Linux/macOS/Windows tests.
   Add minimal shared fixtures if required; keep real installers out of all tests.
   Acceptance: examples and limits match behavior; both locales include new keys;
@@ -89,16 +89,16 @@ Do not alter the specification independently; ask the leader about conflicts.
   `tests/support/mod.rs`, `spec/agents/tasks.md` for checked-off evidence only.
   Verify: all commands in `plan.md`; record local platform and outstanding CI.
   Run the four mandated self-reviews and report findings/resolutions.
-  Verification: Updated `README.md`, `tests/agents_cli.rs`, `tests/support/mod.rs`,
-  and locales; verified all `plan.md` commands locally on macOS (`darwin`/`aarch64`)
-  and completed all 4 self-reviews. The Linux/macOS/Windows workflow matrix was
-  delivered in `a014af0` through the connected GitHub integration; the earlier
-  Git OAuth workflow-scope rejection no longer blocks workflow delivery.
-  Independent macOS verification at `950249e`: 34 unit + 24 integration tests,
-  formatting, strict Clippy, build, and patch checks pass. Resolved the unused
-  `target_agent` binding in `tests/agents_cli.rs` so strict cross-target Clippy
-  passes for both `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`. T007
-  remains unchecked until native Linux/Windows CI test execution completes on PR #25.
+  Verification: Updated `README.md`, `.github/workflows/rust.yml`,
+  `tests/agents_cli.rs`, `tests/support/mod.rs`, and both locales (`en`, `zh-CN`);
+  verified all `plan.md` commands locally on macOS (`darwin`/`aarch64`) and
+  completed all 4 self-reviews (`code-review-and-quality`, `code-simplification`,
+  `security-and-hardening`, `performance-optimization`). Passed 35 unit + 24
+  integration tests (59 total), formatting, strict Clippy for host plus
+  `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`, and validated the
+  Linux/macOS/Windows GitHub Actions matrix on PR #25 (including Windows `.cmd`
+  npm shim parsing, wrapper variable-binding validation, and cross-platform
+  non-executable candidate filtering).
   Dependency: T006.
 
 - [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).

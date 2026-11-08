@@ -1663,6 +1663,52 @@ fn agents_npm_wrapper_rejects_other_prefix_target_and_generic_node_comment() {
             stdout3.contains("manual action required"),
             "wrapper that only prints npm path before exec'ing independent binary must require manual action: {stdout3}"
         );
+
+        // 4. Reassigned `basedir` pointing to `active/bin` while wrapper lives in `stale/bin` must require manual action
+        let wrapper4 = stale_bin.join("codex");
+        fs::write(
+            &wrapper4,
+            format!(
+                "#!/bin/sh\nbasedir='{}'\nexec \"$basedir/../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\n",
+                active_prefix.join("bin").display()
+            ),
+        )
+        .unwrap();
+        let mut perms4 = fs::metadata(&wrapper4).unwrap().permissions();
+        perms4.set_mode(0o755);
+        fs::set_permissions(&wrapper4, perms4).unwrap();
+        let out4 = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&stale_bin],
+            &[],
+        );
+        assert_eq!(out4.status.code(), Some(1));
+        let stdout4 = String::from_utf8_lossy(&out4.stdout);
+        assert!(
+            stdout4.contains("manual action required"),
+            "wrapper with reassigned basedir must not authorize updating stale prefix: {stdout4}"
+        );
+
+        // 5. Bare working-directory-relative target (`exec "../lib/node_modules/@openai/codex/bin/codex" "$@"`) must require manual action
+        fs::write(
+            &wrapper4,
+            "#!/bin/sh\nexec \"../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\n",
+        )
+        .unwrap();
+        let mut perms5 = fs::metadata(&wrapper4).unwrap().permissions();
+        perms5.set_mode(0o755);
+        fs::set_permissions(&wrapper4, perms5).unwrap();
+        let out5 = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&stale_bin],
+            &[],
+        );
+        assert_eq!(out5.status.code(), Some(1));
+        let stdout5 = String::from_utf8_lossy(&out5.stdout);
+        assert!(
+            stdout5.contains("manual action required"),
+            "wrapper with bare working-directory-relative target must not authorize updating stale prefix: {stdout5}"
+        );
     }
     #[cfg(not(unix))]
     {
@@ -1712,6 +1758,27 @@ fn agents_npm_wrapper_rejects_other_prefix_target_and_generic_node_comment() {
         assert!(
             stdout.contains("manual action required"),
             "Windows .cmd wrapper in stale/bin targeting active/lib/node_modules must not authorize updating stale prefix: {stdout}"
+        );
+
+        // Reassigned `dp0` in Windows .cmd wrapper must also require manual action
+        fs::write(
+            stale_bin.join("codex.cmd"),
+            format!(
+                "@echo off\r\nSET dp0={}\r\n\"%dp0%\\lib\\node_modules\\@openai\\codex\\bin\\codex.exe\" %*\r\n",
+                active_prefix.display()
+            ),
+        )
+        .unwrap();
+        let out_dp0 = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&stale_bin],
+            &[],
+        );
+        assert_eq!(out_dp0.status.code(), Some(1));
+        let stdout_dp0 = String::from_utf8_lossy(&out_dp0.stdout);
+        assert!(
+            stdout_dp0.contains("manual action required"),
+            "Windows .cmd wrapper with reassigned dp0 must not authorize updating stale prefix: {stdout_dp0}"
         );
     }
 }

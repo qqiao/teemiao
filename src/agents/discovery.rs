@@ -1895,17 +1895,49 @@ fn launcher_targets_npm_pkg_root(
         && paths_refer_to_same_dir(&target_pkg_root, candidate_pkg_root, is_windows)
 }
 
+#[derive(Default)]
+struct WrapperBindings {
+    basedir_bound_to_launcher: bool,
+    dp0_bound_to_launcher: bool,
+    prog_bound_to_node: bool,
+}
+
 fn extract_verified_wrapper_exec_target(launcher_path: &Path) -> Option<PathBuf> {
     let sample = read_text_wrapper_sample(launcher_path)?;
     let launcher_dir = launcher_path.parent()?;
+    let mut bindings = WrapperBindings::default();
     let mut exec_target: Option<PathBuf> = None;
 
     for line in sample.lines() {
         let trimmed = line.trim();
-        if is_wrapper_comment_or_empty_line(trimmed) || is_wrapper_preamble_line(trimmed) {
+        if is_wrapper_comment_or_empty_line(trimmed) {
             continue;
         }
-        let target = parse_single_exec_line(trimmed, launcher_dir)?;
+        if trimmed == r#"basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")"# {
+            bindings.basedir_bound_to_launcher = true;
+            continue;
+        }
+        if trimmed == r#"basedir=`cygpath -w "$basedir"`"# && bindings.basedir_bound_to_launcher {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("set dp0=%~dp0")
+            || trimmed.eq_ignore_ascii_case("set \"dp0=%~dp0\"")
+        {
+            bindings.dp0_bound_to_launcher = true;
+            continue;
+        }
+        if (trimmed.eq_ignore_ascii_case("set \"_prog=%dp0%\\node.exe\"")
+            && bindings.dp0_bound_to_launcher)
+            || trimmed.eq_ignore_ascii_case("set \"_prog=%~dp0\\node.exe\"")
+            || trimmed.eq_ignore_ascii_case("set \"_prog=node\"")
+        {
+            bindings.prog_bound_to_node = true;
+            continue;
+        }
+        if is_wrapper_preamble_line(trimmed) {
+            continue;
+        }
+        let target = parse_single_exec_line(trimmed, launcher_dir, &bindings)?;
         if let Some(ref prev) = exec_target
             && prev != &target
         {
@@ -1928,14 +1960,12 @@ fn is_wrapper_preamble_line(trimmed: &str) -> bool {
             | "endlocal"
             | "goto start"
             | ":find_dp0"
-            | "set dp0=%~dp0"
             | "exit /b"
             | ":start"
             | "call :find_dp0"
             | "case `uname` in"
             | "*cygwin*|*mingw*|*msys*)"
             | "if command -v cygpath > /dev/null 2>&1; then"
-            | "basedir=`cygpath -w \"$basedir\"`"
             | ";;"
             | "esac"
             | "if [ -x \"$basedir/node\" ]; then"
@@ -1944,58 +1974,79 @@ fn is_wrapper_preamble_line(trimmed: &str) -> bool {
             | "fi"
             | "if exist \"%dp0%\\node.exe\" ("
             | "@if exist \"%~dp0\\node.exe\" ("
-            | "set \"_prog=%dp0%\\node.exe\""
             | ") else ("
-            | "set \"_prog=node\""
             | "set pathext=%pathext:;.js;=;%"
             | "@set pathext=%pathext:;.js;=;%"
             | ")"
-    ) || (trimmed.starts_with("basedir=")
-        && !trimmed.contains(';')
-        && !trimmed.contains("&&")
-        && !trimmed.contains("||"))
+    )
 }
 
 fn is_passthrough_arg(arg: &str) -> bool {
     matches!(arg, "$@" | "$*" | "%*")
 }
 
-fn is_node_interpreter(token: &str) -> bool {
-    let lower = token.replace('\\', "/").to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "node"
-            | "node.exe"
-            | "$basedir/node"
-            | "$basedir/node.exe"
-            | "${basedir}/node"
-            | "${basedir}/node.exe"
-            | "%~dp0/node.exe"
-            | "%dp0%/node.exe"
-            | "%_prog%"
-    ) || lower.ends_with("/bin/node")
-        || lower.ends_with("/node.exe")
+fn is_node_interpreter(token: &str, bindings: &WrapperBindings) -> bool {
+    let normalized = token.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    match lower.as_str() {
+        "node" | "node.exe" | "%~dp0/node.exe" | "%~dp0node.exe" => true,
+        "$basedir/node" | "$basedir/node.exe" | "${basedir}/node" | "${basedir}/node.exe" => {
+            bindings.basedir_bound_to_launcher
+        }
+        "%dp0%/node.exe" | "%dp0%node.exe" => bindings.dp0_bound_to_launcher,
+        "%_prog%" => bindings.prog_bound_to_node,
+        _ => {
+            !lower.contains('$')
+                && !lower.contains('%')
+                && (Path::new(token).is_absolute()
+                    || normalized.starts_with('/')
+                    || is_windows_drive_or_unc_path(&normalized))
+                && (lower.ends_with("/bin/node") || lower.ends_with("/node.exe"))
+        }
+    }
 }
 
-fn parse_single_exec_line(trimmed: &str, launcher_dir: &Path) -> Option<PathBuf> {
-    let lower = trimmed.to_ascii_lowercase();
-    let effective = if let Some(idx) =
-        lower.find("endlocal & goto #_undefined_# 2>nul || title %comspec% &")
-        && idx == 0
-    {
-        let prefix_len = "endlocal & goto #_undefined_# 2>nul || title %comspec% &".len();
-        trimmed.get(prefix_len..)?.trim_start()
+fn strip_ascii_prefix_case_insensitive<'a>(s: &'a str, prefix_lower: &str) -> Option<&'a str> {
+    let head = s.get(..prefix_lower.len())?;
+    if head.eq_ignore_ascii_case(prefix_lower) {
+        s.get(prefix_lower.len()..)
     } else {
-        trimmed
-    };
+        None
+    }
+}
+
+fn parse_single_exec_line(
+    trimmed: &str,
+    launcher_dir: &Path,
+    bindings: &WrapperBindings,
+) -> Option<PathBuf> {
+    let after_endlocal = strip_ascii_prefix_case_insensitive(
+        trimmed,
+        "endlocal & goto #_undefined_# 2>nul || title %comspec% &",
+    )
+    .map(str::trim_start)
+    .unwrap_or(trimmed);
+
+    let effective =
+        strip_ascii_prefix_case_insensitive(after_endlocal, "set pathext=%pathext:;.js;=;% &")
+            .or_else(|| {
+                strip_ascii_prefix_case_insensitive(
+                    after_endlocal,
+                    "@set pathext=%pathext:;.js;=;% &",
+                )
+            })
+            .map(str::trim_start)
+            .unwrap_or(after_endlocal);
 
     let tokens = extract_command_tokens_checked(effective)?;
     let raw_target = match tokens.as_slice() {
         [cmd, target] if cmd == "exec" => target,
         [cmd, target, passthrough] if cmd == "exec" && is_passthrough_arg(passthrough) => target,
-        [cmd, interp, target] if cmd == "exec" && is_node_interpreter(interp) => target,
+        [cmd, interp, target] if cmd == "exec" && is_node_interpreter(interp, bindings) => target,
         [cmd, interp, target, passthrough]
-            if cmd == "exec" && is_node_interpreter(interp) && is_passthrough_arg(passthrough) =>
+            if cmd == "exec"
+                && is_node_interpreter(interp, bindings)
+                && is_passthrough_arg(passthrough) =>
         {
             target
         }
@@ -2009,7 +2060,9 @@ fn parse_single_exec_line(trimmed: &str, launcher_dir: &Path) -> Option<PathBuf>
         {
             target
         }
-        [interp, target, passthrough] if passthrough == "%*" && is_node_interpreter(interp) => {
+        [interp, target, passthrough]
+            if passthrough == "%*" && is_node_interpreter(interp, bindings) =>
+        {
             target
         }
         _ => return None,
@@ -2017,7 +2070,7 @@ fn parse_single_exec_line(trimmed: &str, launcher_dir: &Path) -> Option<PathBuf>
     if raw_target.starts_with('-') {
         return None;
     }
-    Some(resolve_wrapper_path_token(raw_target, launcher_dir))
+    resolve_wrapper_path_token(raw_target, launcher_dir, bindings)
 }
 
 fn is_wrapper_comment_or_empty_line(trimmed: &str) -> bool {
@@ -2100,38 +2153,61 @@ fn extract_command_tokens_checked(line: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-fn resolve_wrapper_path_token(raw_token: &str, launcher_dir: &Path) -> PathBuf {
+fn is_windows_drive_or_unc_path(normalized: &str) -> bool {
+    if normalized.starts_with("//") {
+        return true;
+    }
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn resolve_wrapper_path_token(
+    raw_token: &str,
+    launcher_dir: &Path,
+    bindings: &WrapperBindings,
+) -> Option<PathBuf> {
     let normalized = raw_token.replace('\\', "/");
     let lower = normalized.to_ascii_lowercase();
     let dir_str = launcher_dir.to_string_lossy().replace('\\', "/");
     let dir_trimmed = dir_str.trim_end_matches('/');
 
-    let prefixes = [
-        "$basedir/",
-        "${basedir}/",
-        "%~dp0/",
-        "%~dp0",
-        "%dp0%/",
-        "%dp0%",
-        "$(dirname \"$0\")/",
-        "$(dirname $0)/",
+    let launcher_prefixes: [(&str, bool); 8] = [
+        ("$basedir/", bindings.basedir_bound_to_launcher),
+        ("${basedir}/", bindings.basedir_bound_to_launcher),
+        ("%dp0%/", bindings.dp0_bound_to_launcher),
+        ("%dp0%", bindings.dp0_bound_to_launcher),
+        ("%~dp0/", true),
+        ("%~dp0", true),
+        ("$(dirname \"$0\")/", true),
+        ("$(dirname $0)/", true),
     ];
-    let mut expanded = normalized.clone();
-    for p in prefixes {
-        if lower.starts_with(p) {
-            let rest = normalized[p.len()..].trim_start_matches('/');
-            expanded = format!("{dir_trimmed}/{rest}");
-            break;
+
+    for (prefix, is_bound) in launcher_prefixes {
+        if lower.starts_with(prefix) {
+            if !is_bound {
+                return None;
+            }
+            let rest = normalized.get(prefix.len()..)?.trim_start_matches('/');
+            if rest.is_empty() || rest.contains('$') || rest.contains('%') {
+                return None;
+            }
+            let expanded = format!("{dir_trimmed}/{rest}");
+            return Some(normalize_lexical_path(Path::new(&expanded)));
         }
     }
 
-    let candidate_path = Path::new(&expanded);
-    let joined = if candidate_path.is_absolute() || expanded.starts_with('/') {
-        PathBuf::from(&expanded)
+    if normalized.contains('$') || normalized.contains('%') {
+        return None;
+    }
+
+    if Path::new(raw_token).is_absolute()
+        || normalized.starts_with('/')
+        || is_windows_drive_or_unc_path(&normalized)
+    {
+        Some(normalize_lexical_path(Path::new(&normalized)))
     } else {
-        launcher_dir.join(candidate_path)
-    };
-    normalize_lexical_path(&joined)
+        None
+    }
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {

@@ -1096,8 +1096,11 @@ mod tests {
         create_executable(&bin.join("antigravity"), "#!/bin/sh\n");
         create_executable(&bin.join("agent"), "#!/bin/sh\n");
 
-        // Non-executable file named `codex`
+        // Non-executable entry named `codex` (file without +x on Unix; directory on non-Unix when is_windows=false)
+        #[cfg(unix)]
         fs::write(bin.join("codex"), "not executable").unwrap();
+        #[cfg(not(unix))]
+        fs::create_dir_all(bin.join("codex")).unwrap();
 
         // Broken symlink named `agy`
         #[cfg(unix)]
@@ -1124,6 +1127,36 @@ mod tests {
         assert_eq!(runner.probe_calls().len(), 1);
         let out_str = String::from_utf8(stdout).unwrap();
         assert!(out_str.contains("No supported AI coding-agent CLIs were found on PATH."));
+
+        // Windows PATHEXT candidate filtering: extensionless `codex`, `codex.txt`, and desktop `.exe` launchers are skipped
+        let bin_win = tmp.path().join("bin-win");
+        fs::create_dir_all(&bin_win).unwrap();
+        fs::write(bin_win.join("codex"), "extensionless not runnable on win").unwrap();
+        fs::write(bin_win.join("codex.txt"), "non-PATHEXT extension").unwrap();
+        fs::write(bin_win.join("cursor.exe"), "MZ").unwrap();
+        fs::write(bin_win.join("antigravity.exe"), "MZ").unwrap();
+        fs::write(bin_win.join("agent.exe"), "MZ").unwrap();
+
+        let mut env_win = test_env(&[&bin_win], tmp.path());
+        env_win.is_windows = true;
+        env_win.pathext = Some(OsString::from(".EXE;.CMD"));
+        let runner_win = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                assert_eq!(
+                    name, "agent.exe",
+                    "only PATHEXT-matching agent.exe should be probed"
+                );
+                Ok(ok_output("unrelated-agent 2.0.0"))
+            },
+            |_| panic!("list must never invoke update"),
+        );
+        let mut stdout_win = Vec::new();
+        let mut stderr_win = Vec::new();
+        let code_win = cmd.run_with_io(&env_win, &runner_win, &mut stdout_win, &mut stderr_win);
+        assert_eq!(code_win, 0);
+        assert!(stderr_win.is_empty());
+        assert_eq!(runner_win.probe_calls().len(), 1);
     }
 
     #[test]
@@ -1307,7 +1340,7 @@ mod tests {
         #[cfg(not(unix))]
         create_executable(
             &brew_bin_dir.join("codex"),
-            "#!/bin/sh\nexec \"$basedir/../Caskroom/codex/0.10.0/codex\" \"$@\"\n",
+            "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\nexec \"$basedir/../Caskroom/codex/0.10.0/codex\" \"$@\"\n",
         );
 
         let env_brew = test_env(&[&brew_bin_dir], &home);
@@ -1483,7 +1516,7 @@ mod tests {
         #[cfg(not(unix))]
         create_executable(
             &brew_bin.join("claude"),
-            "#!/bin/sh\nexec \"$basedir/../Caskroom/claude-code@latest/1.0.20/claude\" \"$@\"\n",
+            "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\nexec \"$basedir/../Caskroom/claude-code@latest/1.0.20/claude\" \"$@\"\n",
         );
 
         let env_brew = test_env(&[&brew_bin], &home);
@@ -2055,6 +2088,44 @@ mod tests {
             }
         );
 
+        // 4c. Reassigned `basedir` (`basedir=<active_prefix>/bin`) and unbound `$basedir` and bare working-directory-relative targets must be rejected
+        create_executable(
+            &stale_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nbasedir='{}'\nexec \"$basedir/../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\n",
+                active_prefix.join("bin").display()
+            ),
+        );
+        let mut cache_reassigned = PackageManagerCache::new();
+        let codex_reassigned = discover_agent(
+            AgentId::Codex,
+            &env_stale,
+            &runner_stale,
+            &mut cache_reassigned,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                codex_reassigned.owner,
+                UpdateOwner::ManualActionRequired { .. }
+            ),
+            "reassigned basedir pointing to active prefix must not authorize updating stale prefix: {:?}",
+            codex_reassigned.owner
+        );
+
+        create_executable(
+            &stale_bin.join("codex"),
+            "#!/bin/sh\nexec \"../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\n",
+        );
+        let mut cache_rel = PackageManagerCache::new();
+        let codex_rel =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_rel).unwrap();
+        assert!(
+            matches!(codex_rel.owner, UpdateOwner::ManualActionRequired { .. }),
+            "bare working-directory-relative wrapper target must not be resolved against launcher_dir: {:?}",
+            codex_rel.owner
+        );
+
         // 5. Negated Homebrew message "codex is not already installed" and check-start "Checking whether Antigravity is up to date..."
         let owner_prefix_str2 = owner_prefix.to_string_lossy().into_owned();
         let runner_neg_brew = FakeProcessRunner::new(
@@ -2094,5 +2165,100 @@ mod tests {
             cmd_agy.run_with_io(&env_agy, &runner_agy_check, &mut stdout_ac, &mut stderr_ac);
         assert_eq!(code_ac, 1);
         assert!(String::from_utf8(stdout_ac).unwrap().contains("unverified"));
+    }
+
+    #[test]
+    fn review_current_npm_cmd_shim_retains_npm_ownership() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let prefix = tmp.path().join("npm-win");
+        let pkg_dir = prefix.join("node_modules").join("@openai").join("codex");
+        fs::create_dir_all(pkg_dir.join("bin")).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+        )
+        .unwrap();
+        fs::write(pkg_dir.join("bin").join("codex.js"), "// js entry").unwrap();
+        fs::write(
+            prefix.join("codex.cmd"),
+            concat!(
+                "@ECHO off\r\n",
+                "GOTO start\r\n",
+                ":find_dp0\r\n",
+                "SET dp0=%~dp0\r\n",
+                "EXIT /b\r\n",
+                ":start\r\n",
+                "SETLOCAL\r\n",
+                "CALL :find_dp0\r\n",
+                "\r\n",
+                "IF EXIST \"%dp0%\\node.exe\" (\r\n",
+                "  SET \"_prog=%dp0%\\node.exe\"\r\n",
+                ") ELSE (\r\n",
+                "  SET \"_prog=node\"\r\n",
+                "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n",
+                ")\r\n",
+                "\r\n",
+                "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & set PATHEXT=%PATHEXT:;.JS;=;% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+            ),
+        )
+        .unwrap();
+        fs::write(prefix.join("npm.cmd"), "@echo off\r\n").unwrap();
+
+        let env = DiscoveryEnv {
+            path: OsString::from(prefix.as_os_str()),
+            pathext: Some(OsString::from(".CMD;.EXE")),
+            home_dir: Some(tmp.path().join("home")),
+            local_app_data: Some(tmp.path().join("local")),
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        let runner =
+            FakeProcessRunner::new(|_| Ok(ok_output("codex-cli 0.118.0")), |_| unreachable!());
+        let mut cache = PackageManagerCache::new();
+        let codex = discover_agent(AgentId::Codex, &env, &runner, &mut cache).unwrap();
+
+        assert_eq!(
+            codex.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: prefix.join("npm.cmd"),
+                prefix: prefix.clone(),
+                package: "@openai/codex".to_string(),
+            }
+        );
+
+        // Negative: Windows .cmd shim that reassigns `dp0` or uses a bare working-directory-relative path must be rejected
+        fs::write(
+            prefix.join("codex.cmd"),
+            concat!(
+                "@ECHO off\r\n",
+                "SET dp0=C:\\other\\prefix\\\r\n",
+                "SET \"_prog=%dp0%\\node.exe\"\r\n",
+                "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & set PATHEXT=%PATHEXT:;.JS;=;% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+            ),
+        )
+        .unwrap();
+        let mut cache_bad_dp0 = PackageManagerCache::new();
+        let codex_bad_dp0 =
+            discover_agent(AgentId::Codex, &env, &runner, &mut cache_bad_dp0).unwrap();
+        assert!(matches!(
+            codex_bad_dp0.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        fs::write(
+            prefix.join("codex.cmd"),
+            "@ECHO off\r\nnode \"node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+        )
+        .unwrap();
+        let mut cache_rel_cmd = PackageManagerCache::new();
+        let codex_rel_cmd =
+            discover_agent(AgentId::Codex, &env, &runner, &mut cache_rel_cmd).unwrap();
+        assert!(matches!(
+            codex_rel_cmd.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
     }
 }
