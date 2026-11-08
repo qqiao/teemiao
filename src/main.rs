@@ -15,13 +15,16 @@
 //! Teemiao is a versatile toolkit designed to streamline application
 //! development workflows.
 
+use crate::agents::AgentsCommand;
 use crate::build_info::BuildInfoCommand;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 use rust_i18n::t;
+use std::process::ExitCode;
 use thiserror::Error;
 
+mod agents;
 mod build_info;
 
 rust_i18n::i18n!("locales", fallback = "en");
@@ -73,6 +76,13 @@ enum Commands {
         long_about = t!("commands.config_template.long_about")
     )]
     ConfigTemplate,
+
+    /// Discover and update installed AI coding-agent CLIs on PATH.
+    #[command(
+        about = t!("commands.agents.about"),
+        long_about = t!("commands.agents.long_about")
+    )]
+    Agents(AgentsCommand),
 }
 
 /// Parses a raw locale string into a normalized locale identifier.
@@ -127,6 +137,33 @@ fn detect_locale() -> String {
         .unwrap_or_default();
 
     parse_locale_string(&raw)
+}
+
+#[doc(hidden)]
+fn main() -> ExitCode {
+    // Detect and set locale before parsing CLI args so that
+    // all help text produced by clap uses the correct language.
+    let locale = detect_locale();
+    rust_i18n::set_locale(&locale);
+
+    let cli = Cli::parse();
+
+    env_logger::Builder::new()
+        .filter_level(cli.verbose.log_level_filter())
+        .init();
+
+    match cli.command {
+        Commands::BuildInfo(build_info) => {
+            if let Err(e) = build_info.run() {
+                eprintln!("{}", t!("errors.build_info", error = e));
+            }
+            ExitCode::SUCCESS
+        }
+        Commands::ConfigTemplate => {
+            todo!("config template");
+        }
+        Commands::Agents(agents) => agents.run(),
+    }
 }
 
 #[cfg(test)]
@@ -287,29 +324,5 @@ mod tests {
         assert_eq!(parse_locale_string("en_US"), "en-US");
         assert_eq!(parse_locale_string("zh_TW"), "zh-TW");
         assert_eq!(parse_locale_string("fr_CA"), "fr-CA");
-    }
-}
-
-#[doc(hidden)]
-fn main() {
-    // Detect and set locale before parsing CLI args so that
-    // all help text produced by clap uses the correct language.
-    let locale = detect_locale();
-    rust_i18n::set_locale(&locale);
-
-    let cli = Cli::parse();
-
-    env_logger::Builder::new()
-        .filter_level(cli.verbose.log_level_filter())
-        .init();
-
-    match cli.command {
-        Commands::BuildInfo(build_info) => match build_info.run() {
-            Ok(_) => (),
-            Err(e) => eprintln!("{}", t!("errors.build_info", error = e)),
-        },
-        Commands::ConfigTemplate => {
-            todo!("config template");
-        }
     }
 }
