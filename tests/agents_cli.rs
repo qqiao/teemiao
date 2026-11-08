@@ -1291,6 +1291,15 @@ fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
         stderr.contains("timed out after 5s"),
         "timed-out pipe-holding probe must emit timeout warning: {stderr}"
     );
+    #[cfg(windows)]
+    if let Ok(pid_text) = fs::read_to_string(&pid_file)
+        && let Some(pid) = pid_text.trim().lines().next()
+        && !pid.is_empty()
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", pid])
+            .status();
+    }
 }
 
 #[test]

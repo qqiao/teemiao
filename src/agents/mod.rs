@@ -451,7 +451,17 @@ fn terminate_timed_out_child(child: &mut std::process::Child, child_pid: u32) {
             .stderr(Stdio::null())
             .status();
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    if child_pid > 0 {
+        let pid_str = child_pid.to_string();
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid_str])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = child_pid;
 }
 

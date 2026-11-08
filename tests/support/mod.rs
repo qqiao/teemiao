@@ -165,7 +165,9 @@ fn main() -> ExitCode {
     }
 
     if let Some(del_path) = cfg.get("delete_on_update") {
-        let _ = fs::remove_file(del_path);
+        if fs::remove_file(del_path).is_err() {
+            let _ = fs::rename(del_path, format!("{del_path}.removed"));
+        }
     }
 
     if let Some(next_ver) = cfg.get("next_version_stdout") {
@@ -392,7 +394,25 @@ impl TestSandbox {
             cmd.env(k, v);
         }
 
-        cmd.output().expect("spawn teemiao binary")
+        let run_seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stdout_path = self.root.join(format!(".teemiao_stdout_{run_seq}.tmp"));
+        let stderr_path = self.root.join(format!(".teemiao_stderr_{run_seq}.tmp"));
+        let stdout_file = fs::File::create(&stdout_path).expect("create stdout capture file");
+        let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture file");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(stdout_file))
+            .stderr(std::process::Stdio::from(stderr_file));
+
+        let status = cmd.status().expect("spawn teemiao binary");
+        let stdout = fs::read(&stdout_path).unwrap_or_default();
+        let stderr = fs::read(&stderr_path).unwrap_or_default();
+        let _ = fs::remove_file(&stdout_path);
+        let _ = fs::remove_file(&stderr_path);
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
     }
 
     /// Reads all recorded fake tool invocations from `invocations.log`.
