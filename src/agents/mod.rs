@@ -1627,6 +1627,18 @@ mod tests {
             parse_version_text("rust-v0.11.0-alpha.1"),
             Some("0.11.0-alpha.1".to_string())
         );
+        assert_eq!(
+            parse_version_text("codex <v0.118.0>"),
+            Some("0.118.0".to_string())
+        );
+        assert_eq!(
+            parse_version_text("version='V1.2.3'"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            parse_version_text("Version 1.2.3."),
+            Some("1.2.3".to_string())
+        );
         assert_eq!(parse_version_text("no version here"), None);
     }
 
@@ -2003,6 +2015,49 @@ mod tests {
             select_update_plan(&codex_loose),
             UpdatePlan::ManualActionRequired { .. }
         ));
+
+        // 4. Negative test: project-local npm package (`<project>/node_modules/@openai/codex` via
+        // `<project>/node_modules/.bin/codex`) on Unix must require manual action rather than
+        // misclassifying `<project>` as a global npm prefix.
+        let project_dir = tmp.path().join("my-project");
+        let local_pkg_dir = project_dir
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let local_dot_bin = project_dir.join("node_modules").join(".bin");
+        fs::create_dir_all(local_pkg_dir.join("bin")).unwrap();
+        fs::create_dir_all(&local_dot_bin).unwrap();
+        fs::write(
+            local_pkg_dir.join("package.json"),
+            r#"{"name":"@openai/codex","version":"0.9.0"}"#,
+        )
+        .unwrap();
+        let local_entry = local_pkg_dir.join("bin").join("codex.js");
+        create_executable(&local_entry, "#!/bin/sh\n");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&local_entry, local_dot_bin.join("codex")).unwrap();
+        #[cfg(not(unix))]
+        create_executable(
+            &local_dot_bin.join("codex"),
+            &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", local_entry.display()),
+        );
+        let env_local_npm = test_env(&[&local_dot_bin, &npm_bin], &home);
+        let mut cache_local_npm = PackageManagerCache::new();
+        let codex_local_npm = discover_agent(
+            AgentId::Codex,
+            &env_local_npm,
+            &runner,
+            &mut cache_local_npm,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                codex_local_npm.owner,
+                UpdateOwner::ManualActionRequired { .. }
+            ),
+            "project-local node_modules/.bin/codex must not be classified as NpmGlobal: {:?}",
+            codex_local_npm.owner
+        );
     }
 
     #[test]
@@ -2480,7 +2535,8 @@ mod tests {
             discover_agent(AgentId::Cursor, &env_conflict, &runner_conflict, &mut cache).is_none()
         );
 
-        // 2. `cursor-tools/bin/agent` printing bare `1.0.0` without Cursor branding or metadata must be rejected
+        // 2. `cursor-tools/bin/agent` printing bare `1.0.0` without Cursor branding or metadata must be rejected,
+        // even when `--help` contains a terminal option such as `--hide-cursor`
         let cursor_tools_bin = tmp.path().join("cursor-tools").join("bin");
         create_executable(&cursor_tools_bin.join("agent"), "#!/bin/sh\n");
         let env_tools = test_env(&[&cursor_tools_bin], &home);
@@ -2489,7 +2545,9 @@ mod tests {
                 if req.args.iter().any(|a| a == "--version") {
                     Ok(ok_output("1.0.0"))
                 } else {
-                    Ok(ok_output("Usage: agent [options]"))
+                    Ok(ok_output(
+                        "Usage: agent [options]\n  --hide-cursor  Hide terminal cursor",
+                    ))
                 }
             },
             |_| unreachable!(),
@@ -2497,6 +2555,22 @@ mod tests {
         let mut cache_tools = PackageManagerCache::new();
         assert!(
             discover_agent(AgentId::Cursor, &env_tools, &runner_bare, &mut cache_tools).is_none()
+        );
+
+        // 2b. Unrelated product banner mentioning `Cursor` alongside another product name (`Acme Cursor Agent 1.0.0`) must be rejected
+        let runner_acme_cursor = FakeProcessRunner::new(
+            |_| Ok(ok_output("Acme Cursor Agent 1.0.0")),
+            |_| unreachable!(),
+        );
+        let mut cache_acme = PackageManagerCache::new();
+        assert!(
+            discover_agent(
+                AgentId::Cursor,
+                &env_tools,
+                &runner_acme_cursor,
+                &mut cache_acme
+            )
+            .is_none()
         );
 
         // 3. Adjacent `package.json` with `"name": "@cursor/agent"` and bare date/hash version `2026.11.05-86047df` is accepted

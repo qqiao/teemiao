@@ -555,13 +555,20 @@ fn path_has_cursor_evidence(path: &Path) -> bool {
 
 fn contains_cursor_branding(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("cursor") || lower.contains("anysphere")
+    lower.contains("anysphere")
+        || lower.contains("cursor.com")
+        || lower.contains("cursor agent")
+        || lower.contains("cursor-agent")
+        || lower.contains("cursor cli")
+        || lower.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("cursor ")
+                .is_some_and(|rest| is_version_or_build_token(rest.trim()))
+        })
 }
 
 fn has_conflicting_non_cursor_product(text: &str) -> bool {
-    if contains_cursor_branding(text) {
-        return false;
-    }
     for raw_token in text.split_whitespace() {
         if is_version_or_build_token(raw_token) {
             continue;
@@ -573,7 +580,9 @@ fn has_conflicting_non_cursor_product(text: &str) -> bool {
             let lower = word.to_ascii_lowercase();
             if !matches!(
                 lower.as_str(),
-                "agent"
+                "cursor"
+                    | "anysphere"
+                    | "agent"
                     | "cli"
                     | "version"
                     | "v"
@@ -849,14 +858,14 @@ pub fn parse_version_text(text: &str) -> Option<String> {
             continue;
         }
         for raw_token in trimmed.split(|c: char| {
-            c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"')
+            c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '=')
         }) {
-            let token = raw_token
-                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            let trimmed_token = raw_token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            let token = trimmed_token
                 .strip_prefix("rust-v")
-                .or_else(|| raw_token.strip_prefix('v'))
-                .or_else(|| raw_token.strip_prefix('V'))
-                .unwrap_or(raw_token);
+                .or_else(|| trimmed_token.strip_prefix('v'))
+                .or_else(|| trimmed_token.strip_prefix('V'))
+                .unwrap_or(trimmed_token);
 
             if is_valid_version_token(token) {
                 return Some(token.to_string());
@@ -1102,20 +1111,6 @@ enum ManagerSignal {
     UnsupportedManager {
         manager: String,
     },
-}
-
-impl ManagerSignal {
-    fn kind_tag(&self) -> &'static str {
-        match self {
-            ManagerSignal::Npm { .. } => "npm",
-            ManagerSignal::HomebrewCask { .. } | ManagerSignal::HomebrewFormula { .. } => {
-                "homebrew"
-            }
-            ManagerSignal::WinGet { .. } => "winget",
-            ManagerSignal::CodexStandalone { .. } => "standalone",
-            ManagerSignal::UnsupportedManager { .. } => "unsupported",
-        }
-    }
 }
 
 fn determine_antigravity_owner(launcher_path: &Path, resolved_path: &Path) -> UpdateOwner {
@@ -1420,7 +1415,7 @@ fn determine_codex_owner(
         }
         ManagerSignal::WinGet { package_id } => UpdateOwner::ManualActionRequired {
             reason: format!(
-                "WinGet package '{package_id}' is not an supported automated Codex update path"
+                "WinGet package '{package_id}' is not a supported automated Codex update path"
             ),
             guidance:
                 "Update Codex via npm, Homebrew, or the official standalone PowerShell installer."
@@ -1682,10 +1677,7 @@ fn has_contradictory_signals(signals: &[ManagerSignal]) -> bool {
         return false;
     }
     let first = &signals[0];
-    signals
-        .iter()
-        .skip(1)
-        .any(|s| s != first || s.kind_tag() != first.kind_tag())
+    signals.iter().skip(1).any(|s| s != first)
 }
 
 fn prefer_launcher_prefix(launcher_path: &Path, prefix: PathBuf, is_windows: bool) -> PathBuf {
@@ -1714,10 +1706,14 @@ fn detect_npm_ownership(
     expected_pkg: &str,
     is_windows: bool,
 ) -> Option<ManagerSignal> {
+    if is_local_node_modules_bin_launcher(launcher_path) {
+        return None;
+    }
     let pkg_parts: Vec<&str> = expected_pkg.split('/').collect();
 
     for path in [resolved_path, launcher_path] {
-        if let Some((prefix, pkg_root)) = extract_npm_prefix_from_node_modules(path, &pkg_parts)
+        if let Some((prefix, pkg_root)) =
+            extract_npm_prefix_from_node_modules(path, &pkg_parts, is_windows)
             && verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
         {
             let clean_prefix = prefer_launcher_prefix(launcher_path, prefix, is_windows);
@@ -1745,10 +1741,15 @@ fn detect_npm_ownership(
         };
 
         for prefix_opt in candidate_prefixes.into_iter().flatten() {
-            for rel_base in [
-                prefix_opt.join("lib").join("node_modules"),
-                prefix_opt.join("node_modules"),
-            ] {
+            let rel_bases = if is_windows {
+                vec![
+                    prefix_opt.join("lib").join("node_modules"),
+                    prefix_opt.join("node_modules"),
+                ]
+            } else {
+                vec![prefix_opt.join("lib").join("node_modules")]
+            };
+            for rel_base in rel_bases {
                 let mut pkg_root = rel_base;
                 for part in &pkg_parts {
                     pkg_root = pkg_root.join(part);
@@ -1777,9 +1778,23 @@ fn detect_npm_ownership(
     None
 }
 
+fn is_local_node_modules_bin_launcher(launcher_path: &Path) -> bool {
+    let Some(bin_dir) = launcher_path.parent() else {
+        return false;
+    };
+    bin_dir
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(".bin"))
+        && bin_dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n.eq_ignore_ascii_case("node_modules"))
+}
+
 fn extract_npm_prefix_from_node_modules(
     path: &Path,
     pkg_parts: &[&str],
+    is_windows: bool,
 ) -> Option<(PathBuf, PathBuf)> {
     let components: Vec<OsString> = path
         .components()
@@ -1795,15 +1810,14 @@ fn extract_npm_prefix_from_node_modules(
                     .eq_ignore_ascii_case(expected)
             });
             if matches_pkg {
-                let prefix_end = if idx > 0
+                let has_lib_parent = idx > 0
                     && components[idx - 1]
                         .to_string_lossy()
-                        .eq_ignore_ascii_case("lib")
-                {
-                    idx - 1
-                } else {
-                    idx
-                };
+                        .eq_ignore_ascii_case("lib");
+                if !is_windows && !has_lib_parent {
+                    continue;
+                }
+                let prefix_end = if has_lib_parent { idx - 1 } else { idx };
                 let prefix: PathBuf = components[..prefix_end].iter().collect();
                 let pkg_root: PathBuf = components[..=idx + pkg_parts.len()].iter().collect();
                 return Some((prefix, pkg_root));
@@ -1887,7 +1901,7 @@ fn launcher_targets_npm_pkg_root(
         return false;
     };
     let Some((target_prefix, target_pkg_root)) =
-        extract_npm_prefix_from_node_modules(&exec_target, pkg_parts)
+        extract_npm_prefix_from_node_modules(&exec_target, pkg_parts, is_windows)
     else {
         return false;
     };

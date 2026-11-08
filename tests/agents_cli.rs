@@ -1073,7 +1073,7 @@ fn agents_cursor_rejects_cursor_prefixed_dir_conflicting_banner_and_loose_packag
         "agent",
         &[
             ("version_stdout", "1.2.0"),
-            ("help_stdout", "Usage: agent [options]"),
+            ("help_stdout", "Usage: agent [--hide-cursor]"),
         ],
     );
     let out_pkg = sb_pkg.run_teemiao(&["agents", "list"], &[&pkg_bin], &[]);
