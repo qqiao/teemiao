@@ -1883,37 +1883,141 @@ fn launcher_targets_npm_pkg_root(
     candidate_pkg_root: &Path,
     is_windows: bool,
 ) -> bool {
-    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
+    let Some(exec_target) = extract_verified_wrapper_exec_target(launcher_path) else {
         return false;
     };
-    let Some(launcher_dir) = launcher_path.parent() else {
+    let Some((target_prefix, target_pkg_root)) =
+        extract_npm_prefix_from_node_modules(&exec_target, pkg_parts)
+    else {
         return false;
     };
-    let mut matched_candidate = false;
+    paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows)
+        && paths_refer_to_same_dir(&target_pkg_root, candidate_pkg_root, is_windows)
+}
+
+fn extract_verified_wrapper_exec_target(launcher_path: &Path) -> Option<PathBuf> {
+    let sample = read_text_wrapper_sample(launcher_path)?;
+    let launcher_dir = launcher_path.parent()?;
+    let mut exec_target: Option<PathBuf> = None;
+
     for line in sample.lines() {
         let trimmed = line.trim();
-        if is_wrapper_comment_or_empty_line(trimmed) {
+        if is_wrapper_comment_or_empty_line(trimmed) || is_wrapper_preamble_line(trimmed) {
             continue;
         }
-        for token in extract_command_tokens(trimmed) {
-            if !token.to_ascii_lowercase().contains("node_modules") {
-                continue;
-            }
-            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
-            if let Some((target_prefix, target_pkg_root)) =
-                extract_npm_prefix_from_node_modules(&resolved_token, pkg_parts)
-            {
-                if paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows)
-                    && paths_refer_to_same_dir(&target_pkg_root, candidate_pkg_root, is_windows)
-                {
-                    matched_candidate = true;
-                } else {
-                    return false;
-                }
-            }
+        let target = parse_single_exec_line(trimmed, launcher_dir)?;
+        if let Some(ref prev) = exec_target
+            && prev != &target
+        {
+            return None;
         }
+        exec_target = Some(target);
     }
-    matched_candidate
+
+    exec_target
+}
+
+fn is_wrapper_preamble_line(trimmed: &str) -> bool {
+    let lower = trimmed.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "@echo off"
+            | "echo off"
+            | "@setlocal"
+            | "setlocal"
+            | "endlocal"
+            | "goto start"
+            | ":find_dp0"
+            | "set dp0=%~dp0"
+            | "exit /b"
+            | ":start"
+            | "call :find_dp0"
+            | "case `uname` in"
+            | "*cygwin*|*mingw*|*msys*)"
+            | "if command -v cygpath > /dev/null 2>&1; then"
+            | "basedir=`cygpath -w \"$basedir\"`"
+            | ";;"
+            | "esac"
+            | "if [ -x \"$basedir/node\" ]; then"
+            | "if [ -x \"$basedir/node.exe\" ]; then"
+            | "else"
+            | "fi"
+            | "if exist \"%dp0%\\node.exe\" ("
+            | "@if exist \"%~dp0\\node.exe\" ("
+            | "set \"_prog=%dp0%\\node.exe\""
+            | ") else ("
+            | "set \"_prog=node\""
+            | "set pathext=%pathext:;.js;=;%"
+            | "@set pathext=%pathext:;.js;=;%"
+            | ")"
+    ) || (trimmed.starts_with("basedir=")
+        && !trimmed.contains(';')
+        && !trimmed.contains("&&")
+        && !trimmed.contains("||"))
+}
+
+fn is_passthrough_arg(arg: &str) -> bool {
+    matches!(arg, "$@" | "$*" | "%*")
+}
+
+fn is_node_interpreter(token: &str) -> bool {
+    let lower = token.replace('\\', "/").to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "node"
+            | "node.exe"
+            | "$basedir/node"
+            | "$basedir/node.exe"
+            | "${basedir}/node"
+            | "${basedir}/node.exe"
+            | "%~dp0/node.exe"
+            | "%dp0%/node.exe"
+            | "%_prog%"
+    ) || lower.ends_with("/bin/node")
+        || lower.ends_with("/node.exe")
+}
+
+fn parse_single_exec_line(trimmed: &str, launcher_dir: &Path) -> Option<PathBuf> {
+    let lower = trimmed.to_ascii_lowercase();
+    let effective = if let Some(idx) =
+        lower.find("endlocal & goto #_undefined_# 2>nul || title %comspec% &")
+        && idx == 0
+    {
+        let prefix_len = "endlocal & goto #_undefined_# 2>nul || title %comspec% &".len();
+        trimmed.get(prefix_len..)?.trim_start()
+    } else {
+        trimmed
+    };
+
+    let tokens = extract_command_tokens_checked(effective)?;
+    let raw_target = match tokens.as_slice() {
+        [cmd, target] if cmd == "exec" => target,
+        [cmd, target, passthrough] if cmd == "exec" && is_passthrough_arg(passthrough) => target,
+        [cmd, interp, target] if cmd == "exec" && is_node_interpreter(interp) => target,
+        [cmd, interp, target, passthrough]
+            if cmd == "exec" && is_node_interpreter(interp) && is_passthrough_arg(passthrough) =>
+        {
+            target
+        }
+        [cmd, target, passthrough]
+            if cmd.eq_ignore_ascii_case("call") && is_passthrough_arg(passthrough) =>
+        {
+            target
+        }
+        [target, passthrough]
+            if passthrough == "%*" && (target.contains('/') || target.contains('\\')) =>
+        {
+            target
+        }
+        [interp, target, passthrough] if passthrough == "%*" && is_node_interpreter(interp) => {
+            target
+        }
+        _ => return None,
+    };
+    if raw_target.starts_with('-') {
+        return None;
+    }
+    Some(resolve_wrapper_path_token(raw_target, launcher_dir))
 }
 
 fn is_wrapper_comment_or_empty_line(trimmed: &str) -> bool {
@@ -1935,7 +2039,7 @@ fn is_wrapper_comment_or_empty_line(trimmed: &str) -> bool {
             .is_some_and(|r| r.starts_with(char::is_whitespace))
 }
 
-fn extract_command_tokens(line: &str) -> Vec<String> {
+fn extract_command_tokens_checked(line: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quote: Option<char> = None;
@@ -1962,7 +2066,9 @@ fn extract_command_tokens(line: &str) -> Vec<String> {
                 }
             }
             None => {
-                if c == '"' || c == '\'' {
+                if matches!(c, ';' | '|' | '&' | '>' | '<' | '`') {
+                    return None;
+                } else if c == '"' || c == '\'' {
                     if !current.is_empty() {
                         tokens.push(std::mem::take(&mut current));
                     }
@@ -1985,10 +2091,13 @@ fn extract_command_tokens(line: &str) -> Vec<String> {
             }
         }
     }
+    if in_quote.is_some() {
+        return None;
+    }
     if !current.is_empty() {
         tokens.push(current);
     }
-    tokens
+    Some(tokens)
 }
 
 fn resolve_wrapper_path_token(raw_token: &str, launcher_dir: &Path) -> PathBuf {
@@ -2114,37 +2223,15 @@ fn launcher_references_homebrew(
     candidate_prefix: &Path,
     is_windows: bool,
 ) -> bool {
-    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
+    let Some(exec_target) = extract_verified_wrapper_exec_target(launcher_path) else {
         return false;
     };
-    let Some(launcher_dir) = launcher_path.parent() else {
+    let Some((target_prefix, _)) = extract_homebrew_dir_token(&exec_target, "Caskroom")
+        .or_else(|| extract_homebrew_dir_token(&exec_target, "Cellar"))
+    else {
         return false;
     };
-    let mut matched = false;
-    for line in sample.lines() {
-        let trimmed = line.trim();
-        if is_wrapper_comment_or_empty_line(trimmed) {
-            continue;
-        }
-        for token in extract_command_tokens(trimmed) {
-            let lower = token.to_ascii_lowercase();
-            if !lower.contains("caskroom") && !lower.contains("cellar") {
-                continue;
-            }
-            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
-            if let Some((target_prefix, _)) =
-                extract_homebrew_dir_token(&resolved_token, "Caskroom")
-                    .or_else(|| extract_homebrew_dir_token(&resolved_token, "Cellar"))
-            {
-                if paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows) {
-                    matched = true;
-                } else {
-                    return false;
-                }
-            }
-        }
-    }
-    matched
+    paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows)
 }
 
 fn extract_homebrew_dir_token(path: &Path, marker_dir: &str) -> Option<(PathBuf, String)> {
@@ -2345,34 +2432,13 @@ fn launcher_references_codex_standalone(
     codex_home: &Path,
     is_windows: bool,
 ) -> bool {
-    let Some(sample) = read_text_wrapper_sample(launcher_path) else {
+    let Some(exec_target) = extract_verified_wrapper_exec_target(launcher_path) else {
         return false;
     };
-    let Some(launcher_dir) = launcher_path.parent() else {
+    let Some((target_codex_home, _)) = extract_codex_standalone_root(&exec_target) else {
         return false;
     };
-    let mut matched = false;
-    for line in sample.lines() {
-        let trimmed = line.trim();
-        if is_wrapper_comment_or_empty_line(trimmed) {
-            continue;
-        }
-        for token in extract_command_tokens(trimmed) {
-            let lower = token.to_ascii_lowercase().replace('\\', "/");
-            if !lower.contains("packages/standalone") {
-                continue;
-            }
-            let resolved_token = resolve_wrapper_path_token(&token, launcher_dir);
-            if let Some((target_codex_home, _)) = extract_codex_standalone_root(&resolved_token) {
-                if paths_refer_to_same_dir(&target_codex_home, codex_home, is_windows) {
-                    matched = true;
-                } else {
-                    return false;
-                }
-            }
-        }
-    }
-    matched
+    paths_refer_to_same_dir(&target_codex_home, codex_home, is_windows)
 }
 
 fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {

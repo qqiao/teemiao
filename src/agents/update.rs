@@ -763,6 +763,7 @@ fn evaluate_post_update(
             if updater_output_confirms_up_to_date(
                 &combined_output,
                 &after_version,
+                before_agent.id,
                 &before_agent.owner,
             ) {
                 UpdateOutcome::UpToDate {
@@ -779,7 +780,7 @@ fn evaluate_post_update(
             }
         }
         None => {
-            if updater_output_confirms_updated(&combined_output, &after_version) {
+            if updater_output_confirms_updated(&combined_output, &after_version, before_agent.id) {
                 UpdateOutcome::Updated {
                     before: "unknown".to_string(),
                     after: after_version,
@@ -789,6 +790,7 @@ fn evaluate_post_update(
             } else if updater_output_confirms_up_to_date(
                 &combined_output,
                 &after_version,
+                before_agent.id,
                 &before_agent.owner,
             ) {
                 UpdateOutcome::UpToDate {
@@ -912,6 +914,17 @@ fn line_has_negation_token(line_lower: &str) -> bool {
                 | "failure"
                 | "error"
                 | "fatal"
+                | "checking"
+                | "whether"
+                | "if"
+                | "when"
+                | "while"
+                | "verifying"
+                | "querying"
+                | "searching"
+                | "waiting"
+                | "trying"
+                | "attempting"
         ) {
             return true;
         }
@@ -919,56 +932,145 @@ fn line_has_negation_token(line_lower: &str) -> bool {
     false
 }
 
-fn line_mentions_token(line_lower: &str, token_lower: &str) -> bool {
-    if token_lower.is_empty() {
-        return false;
+fn normalize_affirmative_status_clause(raw_line: &str, ver_lower: &str) -> Option<String> {
+    let trimmed = raw_line.trim().to_ascii_lowercase();
+    if trimmed.is_empty()
+        || trimmed.ends_with("...")
+        || trimmed.ends_with('…')
+        || trimmed.ends_with('?')
+        || trimmed.contains(';')
+        || line_has_negation_token(&trimmed)
+    {
+        return None;
     }
-    for (idx, _) in line_lower.match_indices(token_lower) {
-        let before_ok = idx == 0
-            || !line_lower[..idx]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'));
-        let after_idx = idx + token_lower.len();
-        let after_ok = after_idx == line_lower.len()
-            || !line_lower[after_idx..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'));
-        if before_ok && after_ok {
-            return true;
+
+    let mut clause = trimmed.as_str();
+    for prefix in [
+        "warning: ",
+        "note: ",
+        "info: ",
+        "status: ",
+        "==> ",
+        "✔ ",
+        "✓ ",
+        "[ok] ",
+        "success: ",
+    ] {
+        if let Some(rest) = clause.strip_prefix(prefix) {
+            clause = rest.trim_start();
+            break;
+        }
+    }
+
+    clause = clause.trim_end_matches(['.', '!']).trim();
+    for suffix in [format!(" ({ver_lower})"), format!(" (v{ver_lower})")] {
+        if let Some(rest) = clause.strip_suffix(&suffix) {
+            clause = rest.trim_end();
+            break;
+        }
+    }
+
+    if clause.is_empty() {
+        None
+    } else {
+        Some(clause.to_string())
+    }
+}
+
+fn agent_subject_aliases(agent_id: AgentId) -> &'static [&'static str] {
+    match agent_id {
+        AgentId::Codex => &["codex", "codex cli", "codex-cli", "@openai/codex"],
+        AgentId::Antigravity => &["antigravity", "antigravity cli", "agy"],
+        AgentId::OpenCode => &["opencode", "opencode cli"],
+        AgentId::Kimi => &["kimi", "kimi cli", "kimi-cli"],
+        AgentId::Cursor => &[
+            "cursor",
+            "cursor agent",
+            "cursor-agent",
+            "cursor cli",
+            "agent",
+        ],
+        AgentId::ClaudeCode => &[
+            "claude",
+            "claude code",
+            "claude-code",
+            "claude cli",
+            "@anthropic-ai/claude-code",
+        ],
+    }
+}
+
+fn matches_subject_and_predicate(
+    clause: &str,
+    subjects: &[&str],
+    ver_lower: &str,
+    predicates: &[&str],
+) -> bool {
+    let ver_space = format!("{ver_lower} ");
+    let v_ver_space = format!("v{ver_lower} ");
+    for subj in subjects {
+        if let Some(after_subj) = clause.strip_prefix(subj)
+            && let Some(rest) = after_subj.strip_prefix(' ')
+        {
+            let rest = rest.trim_start();
+            let pred_candidate = rest
+                .strip_prefix(&ver_space)
+                .or_else(|| rest.strip_prefix(&v_ver_space))
+                .unwrap_or(rest)
+                .trim_start();
+            if predicates.contains(&pred_candidate) {
+                return true;
+            }
         }
     }
     false
 }
 
-fn line_has_unrelated_up_to_date_subject(line_lower: &str) -> bool {
-    let unrelated_subjects = [
-        "dependencies",
-        "dependency",
-        "submodules",
-        "submodule",
-        "cache",
-        "configuration",
-        "config",
-        "database",
-        "plugins",
-        "plugin",
-        "extensions",
-        "extension",
-    ];
-    unrelated_subjects.iter().any(|subj| {
-        line_lower.starts_with(subj)
-            || line_lower.contains(&format!("{subj} are up to date"))
-            || line_lower.contains(&format!("{subj} is up to date"))
-            || line_lower.contains(&format!("{subj} is already"))
-            || line_lower.contains(&format!("warning: {subj} "))
-    })
+fn is_duration_clause(rest: &str) -> bool {
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'm' | 's' | ' '))
 }
+
+const NATIVE_AFFIRMATIVE_PREDICATES: &[&str] = &[
+    "is already up to date",
+    "is already up-to-date",
+    "already up to date",
+    "already up-to-date",
+    "is up to date",
+    "is up-to-date",
+    "is already on the latest version",
+    "already on the latest version",
+    "is already on the latest",
+    "already on the latest",
+    "is already at the latest version",
+    "already at the latest version",
+    "is already at the latest",
+    "already at the latest",
+    "is already running the latest version",
+    "already running the latest version",
+    "is already running the latest",
+    "already running the latest",
+    "is the latest version",
+    "is already the latest version",
+];
+
+const HOMEBREW_AFFIRMATIVE_PREDICATES: &[&str] = &[
+    "is already installed and up-to-date",
+    "is already installed and up to date",
+    "already installed and up-to-date",
+    "already installed and up to date",
+    "is already installed",
+    "already installed",
+    "is up-to-date",
+    "is up to date",
+];
 
 fn updater_output_confirms_up_to_date(
     text: &str,
     active_version: &str,
+    agent_id: AgentId,
     owner: &UpdateOwner,
 ) -> bool {
     if updater_output_has_negation_or_failure(text) {
@@ -977,64 +1079,106 @@ fn updater_output_confirms_up_to_date(
 
     let ver_lower = active_version.to_ascii_lowercase();
     for raw_line in text.lines() {
-        let line = raw_line.trim().to_ascii_lowercase();
-        if line.is_empty() || line_has_unrelated_up_to_date_subject(&line) {
+        let Some(clause) = normalize_affirmative_status_clause(raw_line, &ver_lower) else {
             continue;
-        }
+        };
         let matched = match owner {
             UpdateOwner::NativeSelfUpdate { .. } => {
-                const NATIVE_MARKERS: [&str; 10] = [
-                    "already up to date",
-                    "already up-to-date",
-                    "is up to date",
-                    "is up-to-date",
-                    "already on the latest",
-                    "already at the latest",
-                    "already running the latest",
-                    "is the latest version",
-                    "no update available",
-                    "no updates available",
-                ];
-                !line_has_negation_token(&line) && NATIVE_MARKERS.iter().any(|m| line.contains(m))
+                matches!(
+                    clause.as_str(),
+                    "already up to date"
+                        | "already up-to-date"
+                        | "up to date"
+                        | "up-to-date"
+                        | "already on the latest version"
+                        | "already at the latest version"
+                        | "already running the latest version"
+                        | "no update available"
+                        | "no updates available"
+                ) || matches_subject_and_predicate(
+                    &clause,
+                    agent_subject_aliases(agent_id),
+                    &ver_lower,
+                    NATIVE_AFFIRMATIVE_PREDICATES,
+                )
             }
-            UpdateOwner::NpmGlobal { .. } => {
-                !line_has_negation_token(&line)
-                    && (line.contains("up to date")
-                        || line.contains("up-to-date")
-                        || line.contains("changed 0 packages"))
+            UpdateOwner::NpmGlobal { package, .. } => {
+                let pkg_lower = package.to_ascii_lowercase();
+                matches!(
+                    clause.as_str(),
+                    "up to date" | "up-to-date" | "changed 0 packages"
+                ) || clause
+                    .strip_prefix("up to date in ")
+                    .is_some_and(is_duration_clause)
+                    || clause
+                        .strip_prefix("changed 0 packages in ")
+                        .is_some_and(is_duration_clause)
+                    || matches_subject_and_predicate(
+                        &clause,
+                        &[pkg_lower.as_str()],
+                        &ver_lower,
+                        NATIVE_AFFIRMATIVE_PREDICATES,
+                    )
+                    || matches_subject_and_predicate(
+                        &clause,
+                        agent_subject_aliases(agent_id),
+                        &ver_lower,
+                        NATIVE_AFFIRMATIVE_PREDICATES,
+                    )
             }
             UpdateOwner::HomebrewCask { cask_token, .. } => {
-                let cask_lower = cask_token.to_ascii_lowercase();
-                line_mentions_token(&line, &cask_lower)
-                    && (line.contains(&format!("{cask_lower} {ver_lower} is already installed"))
-                        || line.contains("already installed and up-to-date")
-                        || line.contains("already installed")
-                        || line.contains("up-to-date")
-                        || line.contains("up to date")
-                        || line.contains("not upgraded"))
+                let pkg = cask_token.to_ascii_lowercase();
+                let s1 = format!("cask '{pkg}'");
+                let s2 = format!("cask \"{pkg}\"");
+                let s3 = format!("cask {pkg}");
+                let brew_subjects = [pkg.as_str(), s1.as_str(), s2.as_str(), s3.as_str()];
+                matches_subject_and_predicate(
+                    &clause,
+                    &brew_subjects,
+                    &ver_lower,
+                    HOMEBREW_AFFIRMATIVE_PREDICATES,
+                )
             }
             UpdateOwner::HomebrewFormula { formula, .. } => {
-                let formula_lower = formula.to_ascii_lowercase();
-                line_mentions_token(&line, &formula_lower)
-                    && (line.contains(&format!("{formula_lower} {ver_lower} already installed"))
-                        || line.contains("already installed and up-to-date")
-                        || line.contains("already installed")
-                        || line.contains("up-to-date")
-                        || line.contains("up to date")
-                        || line.contains("not upgraded"))
+                let pkg = formula.to_ascii_lowercase();
+                let s1 = format!("formula '{pkg}'");
+                let s2 = format!("formula \"{pkg}\"");
+                let s3 = format!("formula {pkg}");
+                let brew_subjects = [pkg.as_str(), s1.as_str(), s2.as_str(), s3.as_str()];
+                matches_subject_and_predicate(
+                    &clause,
+                    &brew_subjects,
+                    &ver_lower,
+                    HOMEBREW_AFFIRMATIVE_PREDICATES,
+                )
             }
             UpdateOwner::WinGet { .. } => {
-                !line_has_negation_token(&line)
-                    && (line.contains("no available upgrade found")
-                        || line.contains("no newer package versions are available"))
+                matches!(
+                    clause.as_str(),
+                    "no available upgrade found"
+                        | "no newer package versions are available"
+                        | "no applicable update found"
+                )
             }
             UpdateOwner::CodexStandalone { .. } => {
-                !line_has_negation_token(&line)
-                    && (line.contains(&format!("codex cli {ver_lower} installed successfully"))
-                        || (line_mentions_token(&line, "codex")
-                            && (line.contains("already up to date")
-                                || line.contains("already installed")))
-                        || line.starts_with("already up to date"))
+                matches!(
+                    clause.as_str(),
+                    "already up to date"
+                        | "already up-to-date"
+                        | "codex cli installed successfully"
+                ) || matches_subject_and_predicate(
+                    &clause,
+                    &["codex", "codex cli", "codex-cli"],
+                    &ver_lower,
+                    &[
+                        "installed successfully",
+                        "is already installed",
+                        "already installed",
+                        "is already up to date",
+                        "already up to date",
+                        "is up to date",
+                    ],
+                )
             }
             UpdateOwner::ManualActionRequired { .. } => false,
         };
@@ -1046,17 +1190,40 @@ fn updater_output_confirms_up_to_date(
     false
 }
 
-fn updater_output_confirms_updated(text: &str, active_version: &str) -> bool {
+fn updater_output_confirms_updated(text: &str, active_version: &str, agent_id: AgentId) -> bool {
     if updater_output_has_negation_or_failure(text) {
         return false;
     }
-    let lower = text.to_ascii_lowercase();
     let ver_lower = active_version.to_ascii_lowercase();
-    lower.contains(&format!("updated to {ver_lower}"))
-        || lower.contains(&format!("upgraded to {ver_lower}"))
-        || lower.contains(&format!("codex cli {ver_lower} installed successfully"))
-        || lower.contains("successfully updated")
-        || lower.contains("successfully upgraded")
+    let updated_to = format!("updated to {ver_lower}");
+    let updated_to_v = format!("updated to v{ver_lower}");
+    let upgraded_to = format!("upgraded to {ver_lower}");
+    let upgraded_to_v = format!("upgraded to v{ver_lower}");
+    let predicates = [
+        updated_to.as_str(),
+        updated_to_v.as_str(),
+        upgraded_to.as_str(),
+        upgraded_to_v.as_str(),
+        "successfully updated",
+        "successfully upgraded",
+        "installed successfully",
+    ];
+    for raw_line in text.lines() {
+        let Some(clause) = normalize_affirmative_status_clause(raw_line, &ver_lower) else {
+            continue;
+        };
+        if predicates.contains(&clause.as_str())
+            || matches_subject_and_predicate(
+                &clause,
+                agent_subject_aliases(agent_id),
+                &ver_lower,
+                &predicates,
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn format_process_diagnostics(output: &ProcessOutput) -> Option<String> {

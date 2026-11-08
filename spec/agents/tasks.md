@@ -95,9 +95,10 @@ Do not alter the specification independently; ask the leader about conflicts.
   delivered in `a014af0` through the connected GitHub integration; the earlier
   Git OAuth workflow-scope rejection no longer blocks workflow delivery.
   Independent macOS verification at `950249e`: 34 unit + 24 integration tests,
-  formatting, strict Clippy, build, and patch checks pass. T007 remains unchecked:
-  Windows-target strict Clippy fails on unused `target_agent` at
-  `tests/agents_cli.rs:1402`; native Linux/Windows execution is still pending.
+  formatting, strict Clippy, build, and patch checks pass. Resolved the unused
+  `target_agent` binding in `tests/agents_cli.rs` so strict cross-target Clippy
+  passes for both `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`. T007
+  remains unchecked until native Linux/Windows CI test execution completes on PR #25.
   Dependency: T006.
 
 - [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).

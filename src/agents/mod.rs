@@ -1963,7 +1963,7 @@ mod tests {
         create_executable(
             &stale_bin.join("codex"),
             &format!(
-                "#!/bin/sh\n✨ 备注 env node @openai/codex\nexec \"{}\" \"$@\"\n",
+                "#!/bin/sh\n# ✨ 备注 env node @openai/codex\nexec \"{}\" \"$@\"\n",
                 active_target.display()
             ),
         );
@@ -1977,5 +1977,122 @@ mod tests {
             codex_stale.owner,
             UpdateOwner::ManualActionRequired { .. }
         ));
+
+        // 4. Wrapper that prints `stale` npm path in `printf` and `exec`s independent binary must be rejected
+        let indep_bin = tmp.path().join("independent").join("codex");
+        create_executable(&indep_bin, "#!/bin/sh\n");
+        let stale_pkg_bin = stale_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex");
+        create_executable(&stale_pkg_bin, "#!/bin/sh\n");
+        create_executable(
+            &stale_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nprintf 'Unused npm target: %s\\n' '{}' >&2\nexec '{}' \"$@\"\n",
+                stale_pkg_bin.display(),
+                indep_bin.display()
+            ),
+        );
+        let mut cache_diag = PackageManagerCache::new();
+        let codex_diag =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_diag).unwrap();
+        assert!(matches!(
+            codex_diag.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 4b. Conditional wrapper (`if false; then exec ...`) and non-executed argument wrapper must be rejected,
+        // while official npm `cmd-shim` POSIX wrapper pointing to `stale_pkg_bin` succeeds
+        create_executable(
+            &stale_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nif false; then\n  exec '{}' \"$@\"\nfi\nexec '{}' \"$@\"\n",
+                stale_pkg_bin.display(),
+                indep_bin.display()
+            ),
+        );
+        let mut cache_cond = PackageManagerCache::new();
+        let codex_cond =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_cond).unwrap();
+        assert!(matches!(
+            codex_cond.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        create_executable(
+            &stale_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nexec '{}' '{}' \"$@\"\n",
+                indep_bin.display(),
+                stale_pkg_bin.display()
+            ),
+        );
+        let mut cache_arg = PackageManagerCache::new();
+        let codex_arg =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_arg).unwrap();
+        assert!(matches!(
+            codex_arg.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        create_executable(
+            &stale_bin.join("codex"),
+            "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\nif [ -x \"$basedir/node\" ]; then\n  exec \"$basedir/node\" \"$basedir/../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\nelse\n  exec node \"$basedir/../lib/node_modules/@openai/codex/bin/codex\" \"$@\"\nfi\n",
+        );
+        let mut cache_shim = PackageManagerCache::new();
+        let codex_shim =
+            discover_agent(AgentId::Codex, &env_stale, &runner_stale, &mut cache_shim).unwrap();
+        assert_eq!(
+            codex_shim.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: stale_bin.join("npm"),
+                prefix: stale_prefix.clone(),
+                package: "@openai/codex".to_string(),
+            }
+        );
+
+        // 5. Negated Homebrew message "codex is not already installed" and check-start "Checking whether Antigravity is up to date..."
+        let owner_prefix_str2 = owner_prefix.to_string_lossy().into_owned();
+        let runner_neg_brew = FakeProcessRunner::new(
+            move |req| {
+                if req.args.iter().any(|a| a == "--prefix") {
+                    Ok(ok_output(&owner_prefix_str2))
+                } else if req.args.iter().any(|a| a == "list") {
+                    Ok(ok_output("codex\n"))
+                } else {
+                    Ok(ok_output("codex 0.118.0"))
+                }
+            },
+            |_| Ok(ok_output("codex is not already installed")),
+        );
+        let mut stdout_nb = Vec::new();
+        let mut stderr_nb = Vec::new();
+        let code_nb = cmd.run_with_io(&env, &runner_neg_brew, &mut stdout_nb, &mut stderr_nb);
+        assert_eq!(code_nb, 1);
+        assert!(String::from_utf8(stdout_nb).unwrap().contains("unverified"));
+
+        let agy_bin_dir = tmp.path().join("agy-bin");
+        create_executable(&agy_bin_dir.join("agy"), "#!/bin/sh\n");
+        let env_agy = test_env(&[&agy_bin_dir], &home);
+        let runner_agy_check = FakeProcessRunner::new(
+            |_| Ok(ok_output("Antigravity CLI 1.0.0")),
+            |_| Ok(ok_output("Checking whether Antigravity is up to date...")),
+        );
+        let cmd_agy = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: Some(AgentId::Antigravity),
+                dry_run: false,
+            }),
+        };
+        let mut stdout_ac = Vec::new();
+        let mut stderr_ac = Vec::new();
+        let code_ac =
+            cmd_agy.run_with_io(&env_agy, &runner_agy_check, &mut stdout_ac, &mut stderr_ac);
+        assert_eq!(code_ac, 1);
+        assert!(String::from_utf8(stdout_ac).unwrap().contains("unverified"));
     }
 }

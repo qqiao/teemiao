@@ -1386,29 +1386,95 @@ fn agents_update_rejects_negated_error_or_unrelated_up_to_date_messages() {
         stdout_brew.contains("unverified"),
         "foreign 'ripgrep is already installed' message must not report Codex up to date: {stdout_brew}"
     );
+
+    // 5. Homebrew updater printing negated "codex is not already installed" must be unverified (exit 1)
+    let sb_brew_neg = TestSandbox::new();
+    let brew_prefix_neg = sb_brew_neg.root.join("homebrew");
+    let brew_bin_neg = brew_prefix_neg.join("bin");
+    let cask_dir_neg = brew_prefix_neg
+        .join("Caskroom")
+        .join("codex")
+        .join("0.118.0");
+    fs::create_dir_all(&cask_dir_neg).unwrap();
+    let (cask_codex_neg, _) = sb_brew_neg.install_fake_tool_in(
+        &cask_dir_neg,
+        "codex",
+        &[("version_stdout", "codex-cli 0.118.0")],
+    );
+    fs::create_dir_all(&brew_bin_neg).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cask_codex_neg, brew_bin_neg.join("codex")).unwrap();
+    #[cfg(not(unix))]
+    fs::write(
+        brew_bin_neg.join("codex.cmd"),
+        format!("@echo off\r\n\"{}\" %*\r\n", cask_codex_neg.display()),
+    )
+    .unwrap();
+    let prefix_neg_str = brew_prefix_neg.to_string_lossy().into_owned();
+    sb_brew_neg.install_fake_tool_in(
+        &brew_bin_neg,
+        "brew",
+        &[
+            ("prefix_stdout", &prefix_neg_str),
+            ("list_stdout", "codex"),
+            ("update_stdout", "codex is not already installed"),
+        ],
+    );
+    let out_brew_neg =
+        sb_brew_neg.run_teemiao(&["agents", "update", "codex"], &[&brew_bin_neg], &[]);
+    assert_eq!(out_brew_neg.status.code(), Some(1));
+    let stdout_brew_neg = String::from_utf8_lossy(&out_brew_neg.stdout);
+    assert!(
+        stdout_brew_neg.contains("unverified"),
+        "negated Homebrew 'codex is not already installed' must not report Codex up to date: {stdout_brew_neg}"
+    );
+
+    // 6. Native updater printing progress/check-start "Checking whether Antigravity is up to date..." must be unverified (exit 1)
+    let sb_check = TestSandbox::new();
+    sb_check.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity CLI 1.0.0"),
+            (
+                "update_stdout",
+                "Checking whether Antigravity is up to date...",
+            ),
+        ],
+    );
+    let out_check = sb_check.run_teemiao(
+        &["agents", "update", "antigravity"],
+        &[&sb_check.bin_dir],
+        &[],
+    );
+    assert_eq!(out_check.status.code(), Some(1));
+    let stdout_check = String::from_utf8_lossy(&out_check.stdout);
+    assert!(
+        stdout_check.contains("unverified"),
+        "check-start message 'Checking whether Antigravity is up to date...' must be unverified: {stdout_check}"
+    );
 }
 
 #[test]
 fn agents_cursor_accepts_date_hash_versions_and_prefers_verified_primary_over_older_alias() {
     let sb = TestSandbox::new();
-    let version_dir = sb
-        .home
-        .join(".local")
-        .join("share")
-        .join("cursor-agent")
-        .join("versions")
-        .join("2026.11.05-86047df");
-    fs::create_dir_all(&version_dir).unwrap();
-    let (target_agent, _) = sb.install_fake_tool_in(
-        &version_dir,
-        "agent",
-        &[
-            ("version_stdout", "2026.11.05-86047df"),
-            ("help_stdout", "Start the Cursor Agent"),
-        ],
-    );
     #[cfg(unix)]
     {
+        let version_dir = sb
+            .home
+            .join(".local")
+            .join("share")
+            .join("cursor-agent")
+            .join("versions")
+            .join("2026.11.05-86047df");
+        fs::create_dir_all(&version_dir).unwrap();
+        let (target_agent, _) = sb.install_fake_tool_in(
+            &version_dir,
+            "agent",
+            &[
+                ("version_stdout", "2026.11.05-86047df"),
+                ("help_stdout", "Start the Cursor Agent"),
+            ],
+        );
         let link_path = sb.bin_dir.join("agent");
         let _ = fs::remove_file(&link_path);
         std::os::unix::fs::symlink(&target_agent, &link_path).unwrap();
@@ -1547,6 +1613,105 @@ fn agents_npm_wrapper_rejects_other_prefix_target_and_generic_node_comment() {
         assert!(
             stdout2.contains("manual action required"),
             "unrelated wrapper with 'env node' comment must not authorize npm update: {stdout2}"
+        );
+
+        // 3. Wrapper that prints npm path in diagnostic `printf` and `exec`s independent binary
+        let sb3 = TestSandbox::new();
+        let stale3 = sb3.root.join("stale");
+        let pkg3 = stale3
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        fs::create_dir_all(&pkg3).unwrap();
+        fs::write(
+            pkg3.join("package.json"),
+            r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+        )
+        .unwrap();
+        let (stale_target3, _) = sb3.install_fake_tool_in(
+            &pkg3.join("bin"),
+            "codex",
+            &[("version_stdout", "codex-cli 0.118.0")],
+        );
+        let (indep_target3, _) = sb3.install_fake_tool_in(
+            &sb3.root.join("independent"),
+            "codex",
+            &[("version_stdout", "codex-cli 0.118.0")],
+        );
+        let bin3 = stale3.join("bin");
+        fs::create_dir_all(&bin3).unwrap();
+        let wrapper3 = bin3.join("codex");
+        fs::write(
+            &wrapper3,
+            format!(
+                "#!/bin/sh\nprintf 'Unused npm target: %s\\n' '{}' >&2\nexec '{}' \"$@\"\n",
+                stale_target3.display(),
+                indep_target3.display()
+            ),
+        )
+        .unwrap();
+        let mut perms3 = fs::metadata(&wrapper3).unwrap().permissions();
+        perms3.set_mode(0o755);
+        fs::set_permissions(&wrapper3, perms3).unwrap();
+        sb3.install_fake_tool_in(&bin3, "npm", &[("update_stdout", "added 1 package")]);
+
+        let out3 = sb3.run_teemiao(&["agents", "update", "codex", "--dry-run"], &[&bin3], &[]);
+        assert_eq!(out3.status.code(), Some(1));
+        let stdout3 = String::from_utf8_lossy(&out3.stdout);
+        assert!(
+            stdout3.contains("manual action required"),
+            "wrapper that only prints npm path before exec'ing independent binary must require manual action: {stdout3}"
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let sb = TestSandbox::new();
+        let active_prefix = sb.root.join("active");
+        let stale_prefix = sb.root.join("stale");
+        for prefix in [&active_prefix, &stale_prefix] {
+            let pkg_dir = prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex");
+            fs::create_dir_all(&pkg_dir).unwrap();
+            fs::write(
+                pkg_dir.join("package.json"),
+                r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+            )
+            .unwrap();
+        }
+        let active_bin_dir = active_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        let (active_codex, _) = sb.install_fake_tool_in(
+            &active_bin_dir,
+            "codex",
+            &[("version_stdout", "codex-cli 0.118.0")],
+        );
+        let stale_bin = stale_prefix.join("bin");
+        fs::create_dir_all(&stale_bin).unwrap();
+        fs::write(
+            stale_bin.join("codex.cmd"),
+            format!("@echo off\r\n\"{}\" %*\r\n", active_codex.display()),
+        )
+        .unwrap();
+        sb.install_fake_tool_in(&stale_bin, "npm", &[("update_stdout", "added 1 package")]);
+
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&stale_bin],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("manual action required"),
+            "Windows .cmd wrapper in stale/bin targeting active/lib/node_modules must not authorize updating stale prefix: {stdout}"
         );
     }
 }
