@@ -80,7 +80,7 @@ Do not alter the specification independently; ask the leader about conflicts.
   empty `PATH` no-op (`0`), partial-failure continuation (`1`), cancellation stop
   (`130`), and `en`/`zh-CN` localized output. Dependency: T005.
 
-- [x] **T007 — Document and validate platform support** (Coder; medium).
+- [ ] **T007 — Document and validate platform support** (Coder; medium).
   Update README and the existing CI workflow with Linux/macOS/Windows tests.
   Add minimal shared fixtures if required; keep real installers out of all tests.
   Acceptance: examples and limits match behavior; both locales include new keys;
@@ -91,10 +91,10 @@ Do not alter the specification independently; ask the leader about conflicts.
   Run the four mandated self-reviews and report findings/resolutions.
   Verification: Updated `README.md`, `tests/agents_cli.rs`, `tests/support/mod.rs`,
   and locales; verified all `plan.md` commands locally on macOS (`darwin`/`aarch64`)
-  and completed all 4 self-reviews. Note: pushing `.github/workflows/rust.yml` is
-  rejected by GitHub (`refusing to allow an OAuth App to create or update workflow
-  .github/workflows/rust.yml without workflow scope`), so `.github/workflows/rust.yml`
-  must be updated by a credential with `workflow` scope. Dependency: T006.
+  and completed all 4 self-reviews. Left unchecked because pushing
+  `.github/workflows/rust.yml` is blocked by GitHub (`refusing to allow an OAuth App
+  to create or update workflow .github/workflows/rust.yml without workflow scope`).
+  Dependency: T006.
 
 - [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).
   Leader reviews code, test quality, security, and requirements coverage. Coder

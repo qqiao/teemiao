@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -295,6 +295,12 @@ impl RealProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        #[cfg(unix)]
+        if request.timeout.is_some() {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
         for (k, v) in &request.env_overrides {
             cmd.env(k, v);
         }
@@ -303,28 +309,43 @@ impl RealProcessRunner {
             program: request.program.clone(),
             source,
         })?;
+        let child_pid = child.id();
 
         let stdout_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
         let stderr_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
+        let reader_state = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let mut expected_readers = 0usize;
 
         let stdout_handle = child.stdout.take().map(|out| {
-            spawn_bounded_reader(out, Arc::clone(&stdout_buf), request.max_output_bytes)
+            expected_readers += 1;
+            spawn_bounded_reader(
+                out,
+                Arc::clone(&stdout_buf),
+                request.max_output_bytes,
+                Arc::clone(&reader_state),
+            )
         });
         let stderr_handle = child.stderr.take().map(|err| {
-            spawn_bounded_reader(err, Arc::clone(&stderr_buf), request.max_output_bytes)
+            expected_readers += 1;
+            spawn_bounded_reader(
+                err,
+                Arc::clone(&stderr_buf),
+                request.max_output_bytes,
+                Arc::clone(&reader_state),
+            )
         });
 
         let mut timed_out = false;
 
         let status = if let Some(limit) = request.timeout {
             let start = Instant::now();
-            loop {
+            let exit_status = loop {
                 match child.try_wait() {
                     Ok(Some(status)) => break status,
                     Ok(None) => {
                         if start.elapsed() >= limit {
                             timed_out = true;
-                            let _ = child.kill();
+                            terminate_timed_out_child(&mut child, child_pid);
                             let status = child.wait().map_err(|source| ProcessError::Io {
                                 program: request.program.clone(),
                                 source,
@@ -334,7 +355,7 @@ impl RealProcessRunner {
                         thread::sleep(Duration::from_millis(10));
                     }
                     Err(source) => {
-                        let _ = child.kill();
+                        terminate_timed_out_child(&mut child, child_pid);
                         let _ = child.wait();
                         return Err(ProcessError::Io {
                             program: request.program.clone(),
@@ -342,7 +363,34 @@ impl RealProcessRunner {
                         });
                     }
                 }
+            };
+
+            if !timed_out && expected_readers > 0 {
+                let (lock, cvar) = &*reader_state;
+                let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while *done < expected_readers {
+                    let elapsed = start.elapsed();
+                    if elapsed >= limit {
+                        timed_out = true;
+                        drop(done);
+                        terminate_timed_out_child(&mut child, child_pid);
+                        break;
+                    }
+                    let remaining = limit - elapsed;
+                    let (next_done, wait_res) = cvar
+                        .wait_timeout(done, remaining)
+                        .unwrap_or_else(|e| e.into_inner());
+                    done = next_done;
+                    if wait_res.timed_out() && *done < expected_readers {
+                        timed_out = true;
+                        drop(done);
+                        terminate_timed_out_child(&mut child, child_pid);
+                        break;
+                    }
+                }
             }
+
+            exit_status
         } else {
             child.wait().map_err(|source| ProcessError::Io {
                 program: request.program.clone(),
@@ -358,8 +406,8 @@ impl RealProcessRunner {
                 let _ = h.join();
             }
         } else {
-            // Give reader threads a brief moment to flush buffered bytes after child kill;
-            // do not block indefinitely if a grandchild process inherited the pipe.
+            // Give reader threads a brief moment to flush buffered bytes after killing the
+            // process group; never block indefinitely if an external handle remains open.
             thread::sleep(Duration::from_millis(20));
         }
 
@@ -391,10 +439,27 @@ impl RealProcessRunner {
     }
 }
 
+fn terminate_timed_out_child(child: &mut std::process::Child, child_pid: u32) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    if child_pid > 1 {
+        let neg_pgid = format!("-{child_pid}");
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &neg_pgid])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = child_pid;
+}
+
 fn spawn_bounded_reader<R: Read + Send + 'static>(
     mut reader: R,
     buffer: Arc<Mutex<BoundedStreamBuffer>>,
     max_bytes: usize,
+    completion: Arc<(Mutex<usize>, Condvar)>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -419,6 +484,10 @@ fn spawn_bounded_reader<R: Read + Send + 'static>(
                 Err(_) => break,
             }
         }
+        let (lock, cvar) = &*completion;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *done += 1;
+        cvar.notify_all();
     })
 }
 
@@ -963,7 +1032,10 @@ mod tests {
             r#"{"version":"0.10.0","target":"aarch64-apple-darwin","entrypoint":"bin/codex"}"#,
         )
         .unwrap();
-        create_executable(&local_bin.join("codex"), "#!/bin/sh\n");
+        create_executable(
+            &local_bin.join("codex"),
+            "#!/bin/sh\n# .codex/packages/standalone\n",
+        );
         create_executable(&local_bin.join("agy"), "#!/bin/sh\n");
         create_executable(&local_bin.join("opencode"), "#!/bin/sh\n");
         create_executable(&local_bin.join("kimi"), "#!/bin/sh\n");
@@ -1046,7 +1118,7 @@ mod tests {
         let code = cmd.run_with_io(&env, &runner, &mut stdout, &mut stderr);
         assert_eq!(code, 0);
         assert!(stderr.is_empty());
-        assert_eq!(runner.probe_calls().len(), 2);
+        assert_eq!(runner.probe_calls().len(), 1);
         let out_str = String::from_utf8(stdout).unwrap();
         assert!(out_str.contains("No supported AI coding-agent CLIs were found on PATH."));
     }
@@ -1227,7 +1299,7 @@ mod tests {
             std::os::unix::fs::symlink(cask_dir.join("codex"), brew_bin_dir.join("codex")).unwrap();
         }
         #[cfg(not(unix))]
-        create_executable(&brew_bin_dir.join("codex"), "#!/bin/sh\n");
+        create_executable(&brew_bin_dir.join("codex"), "#!/bin/sh\n# Caskroom/codex\n");
 
         let env_brew = test_env(&[&brew_bin_dir], &home);
         let runner_brew = FakeProcessRunner::new(
@@ -1290,7 +1362,10 @@ mod tests {
             r#"{"version":"0.10.0","target":"aarch64-apple-darwin","entrypoint":"bin/codex"}"#,
         )
         .unwrap();
-        create_executable(&local_bin.join("codex"), "#!/bin/sh\n");
+        create_executable(
+            &local_bin.join("codex"),
+            "#!/bin/sh\n# .codex/packages/standalone\n",
+        );
         create_executable(&local_bin.join("curl"), "#!/bin/sh\n");
         create_executable(&local_bin.join("sh"), "#!/bin/sh\n");
 
@@ -1394,7 +1469,10 @@ mod tests {
             std::os::unix::fs::symlink(cask_dir.join("claude"), brew_bin.join("claude")).unwrap();
         }
         #[cfg(not(unix))]
-        create_executable(&brew_bin.join("claude"), "#!/bin/sh\n");
+        create_executable(
+            &brew_bin.join("claude"),
+            "#!/bin/sh\n# Caskroom/claude-code@latest\n",
+        );
 
         let env_brew = test_env(&[&brew_bin], &home);
         let runner_brew = FakeProcessRunner::new(
@@ -1644,6 +1722,18 @@ mod tests {
         create_executable(&win_bin.join("rg.exe"), "MZ");
         create_executable(&win_bin.join("curl.exe"), "MZ");
         create_executable(&win_bin.join("powershell.exe"), "MZ");
+        let win_standalone_dir = tmp
+            .path()
+            .join(".codex")
+            .join("packages")
+            .join("standalone")
+            .join("current");
+        fs::create_dir_all(&win_standalone_dir).unwrap();
+        fs::write(
+            win_standalone_dir.join("codex-package.json"),
+            r#"{"version":"0.10.0","channel":"stable"}"#,
+        )
+        .unwrap();
 
         let env = DiscoveryEnv {
             path: OsString::from(win_bin.as_os_str()),
@@ -1706,5 +1796,123 @@ mod tests {
         assert_eq!(code, 0);
         let out_str = String::from_utf8(stdout).unwrap();
         assert!(out_str.contains("Codex (codex): updated (0.10.0 -> 0.11.0"));
+    }
+
+    #[test]
+    fn cursor_rejects_conflicting_banner_even_in_cursor_dirs_and_accepts_parsed_package_json() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+
+        // 1. `.cursor/bin/agent` printing `Datadog Agent 7.50.0` must be rejected
+        let dot_cursor_bin = home.join(".cursor").join("bin");
+        create_executable(&dot_cursor_bin.join("agent"), "#!/bin/sh\n");
+        let env_conflict = test_env(&[&dot_cursor_bin], &home);
+        let runner_conflict = FakeProcessRunner::new(
+            |_| Ok(ok_output("Datadog Agent 7.50.0")),
+            |_| unreachable!(),
+        );
+        let mut cache = PackageManagerCache::new();
+        assert!(
+            discover_agent(AgentId::Cursor, &env_conflict, &runner_conflict, &mut cache).is_none()
+        );
+
+        // 2. `cursor-tools/bin/agent` printing bare `1.0.0` without Cursor branding or metadata must be rejected
+        let cursor_tools_bin = tmp.path().join("cursor-tools").join("bin");
+        create_executable(&cursor_tools_bin.join("agent"), "#!/bin/sh\n");
+        let env_tools = test_env(&[&cursor_tools_bin], &home);
+        let runner_bare = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--version") {
+                    Ok(ok_output("1.0.0"))
+                } else {
+                    Ok(ok_output("Usage: agent [options]"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_tools = PackageManagerCache::new();
+        assert!(
+            discover_agent(AgentId::Cursor, &env_tools, &runner_bare, &mut cache_tools).is_none()
+        );
+
+        // 3. Adjacent `package.json` with `"name": "@cursor/agent"` and bare version `0.48.0` is accepted
+        let cursor_pkg_dir = tmp.path().join("verified-pkg");
+        let cursor_pkg_bin = cursor_pkg_dir.join("bin");
+        create_executable(&cursor_pkg_bin.join("agent"), "#!/bin/sh\n");
+        fs::write(
+            cursor_pkg_dir.join("package.json"),
+            r#"{"name":"@cursor/agent","version":"0.48.0"}"#,
+        )
+        .unwrap();
+        let env_pkg = test_env(&[&cursor_pkg_bin], &home);
+        let runner_pkg = FakeProcessRunner::new(|_| Ok(ok_output("0.48.0")), |_| unreachable!());
+        let mut cache_pkg = PackageManagerCache::new();
+        let discovered =
+            discover_agent(AgentId::Cursor, &env_pkg, &runner_pkg, &mut cache_pkg).unwrap();
+        assert_eq!(discovered.version.as_deref(), Some("0.48.0"));
+    }
+
+    #[test]
+    fn homebrew_multi_prefix_and_negative_updater_messages_are_verified() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+
+        // 1. When `other_brew/bin` precedes `owner_brew/bin` on PATH, `owner_brew/bin/brew` is selected
+        let other_prefix = tmp.path().join("other-brew");
+        let other_bin = other_prefix.join("bin");
+        let owner_prefix = tmp.path().join("owner-brew");
+        let owner_bin = owner_prefix.join("bin");
+        let cask_dir = owner_prefix.join("Caskroom").join("codex").join("0.118.0");
+        fs::create_dir_all(&cask_dir).unwrap();
+        create_executable(&other_bin.join("brew"), "#!/bin/sh\n");
+        create_executable(&owner_bin.join("brew"), "#!/bin/sh\n");
+        create_executable(&owner_bin.join("codex"), "#!/bin/sh\n# Caskroom/codex\n");
+
+        let other_prefix_str = other_prefix.to_string_lossy().into_owned();
+        let owner_prefix_str = owner_prefix.to_string_lossy().into_owned();
+        let env = test_env(&[&other_bin, &owner_bin], &home);
+        let runner = FakeProcessRunner::new(
+            move |req| {
+                let prog = req.program.to_string_lossy();
+                if req.args.iter().any(|a| a == "--prefix") {
+                    if prog.contains("other-brew") {
+                        Ok(ok_output(&other_prefix_str))
+                    } else {
+                        Ok(ok_output(&owner_prefix_str))
+                    }
+                } else if req.args.iter().any(|a| a == "list") {
+                    Ok(ok_output("codex\n"))
+                } else {
+                    Ok(ok_output("codex 0.118.0"))
+                }
+            },
+            |_| Ok(ok_output("Not up to date. Update check failed.")),
+        );
+
+        let mut cache = PackageManagerCache::new();
+        let codex = discover_agent(AgentId::Codex, &env, &runner, &mut cache).unwrap();
+        assert_eq!(
+            codex.owner,
+            UpdateOwner::HomebrewCask {
+                brew_program: owner_bin.join("brew"),
+                cask_token: "codex".to_string(),
+            }
+        );
+
+        // 2. Negated updater output "Not up to date. Update check failed." must produce Unverified (exit 1)
+        let cmd = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: Some(AgentId::Codex),
+                dry_run: false,
+            }),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = cmd.run_with_io(&env, &runner, &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+        let out_str = String::from_utf8(stdout).unwrap();
+        assert!(out_str.contains("unverified"));
     }
 }

@@ -760,7 +760,11 @@ fn evaluate_post_update(
             diagnostics,
         },
         Some(_same_version) => {
-            if updater_output_confirms_up_to_date(&combined_output, &after_version) {
+            if updater_output_confirms_up_to_date(
+                &combined_output,
+                &after_version,
+                &before_agent.owner,
+            ) {
                 UpdateOutcome::UpToDate {
                     version: after_version,
                     path: after_agent.launcher_path,
@@ -782,7 +786,11 @@ fn evaluate_post_update(
                     path: after_agent.launcher_path,
                     diagnostics,
                 }
-            } else if updater_output_confirms_up_to_date(&combined_output, &after_version) {
+            } else if updater_output_confirms_up_to_date(
+                &combined_output,
+                &after_version,
+                &before_agent.owner,
+            ) {
                 UpdateOutcome::UpToDate {
                     version: after_version,
                     path: after_agent.launcher_path,
@@ -841,39 +849,124 @@ fn detect_manual_only_updater_output(text: &str) -> Option<(String, String)> {
     None
 }
 
-fn updater_output_confirms_up_to_date(text: &str, active_version: &str) -> bool {
+fn updater_output_has_negation_or_failure(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    let positive_markers = [
-        "up to date",
-        "up-to-date",
-        "already on the latest",
-        "already at the latest",
-        "already latest",
-        "already installed",
-        "is the latest version",
-        "no update available",
-        "no updates available",
-        "nothing to update",
-        "already running the latest",
-        "no available upgrade found",
-        "no newer package versions are available",
-        "not upgraded",
-        "unchanged",
-        "changed 0 packages",
+    let negative_markers = [
+        "not up to date",
+        "not up-to-date",
+        "isn't up to date",
+        "is not up to date",
+        "update check failed",
+        "check failed",
+        "update failed",
+        "upgrade failed",
+        "failed to ",
+        "failed:",
+        "error:",
+        "error ",
+        "fatal:",
+        "cannot ",
+        "could not ",
+        "unable to ",
     ];
-    if positive_markers.iter().any(|m| lower.contains(m)) {
-        return true;
+    negative_markers.iter().any(|m| lower.contains(m))
+}
+
+fn line_has_unrelated_up_to_date_subject(line_lower: &str) -> bool {
+    let unrelated_subjects = [
+        "dependencies",
+        "dependency",
+        "submodules",
+        "submodule",
+        "cache",
+        "configuration",
+        "config",
+        "database",
+        "plugins",
+        "plugin",
+        "extensions",
+        "extension",
+    ];
+    unrelated_subjects.iter().any(|subj| {
+        line_lower.starts_with(subj)
+            || line_lower.contains(&format!("{subj} are up to date"))
+            || line_lower.contains(&format!("{subj} is up to date"))
+    })
+}
+
+fn updater_output_confirms_up_to_date(
+    text: &str,
+    active_version: &str,
+    owner: &UpdateOwner,
+) -> bool {
+    if updater_output_has_negation_or_failure(text) {
+        return false;
     }
 
-    // Codex standalone installer outputs "Codex CLI <ver> installed successfully." even on a same-version run.
-    let expected_codex = format!(
-        "codex cli {} installed successfully",
-        active_version.to_ascii_lowercase()
-    );
-    lower.contains(&expected_codex)
+    let ver_lower = active_version.to_ascii_lowercase();
+    for raw_line in text.lines() {
+        let line = raw_line.trim().to_ascii_lowercase();
+        if line.is_empty() || line_has_unrelated_up_to_date_subject(&line) {
+            continue;
+        }
+        let matched = match owner {
+            UpdateOwner::NativeSelfUpdate { .. } => {
+                const NATIVE_MARKERS: [&str; 10] = [
+                    "already up to date",
+                    "already up-to-date",
+                    "is up to date",
+                    "is up-to-date",
+                    "already on the latest",
+                    "already at the latest",
+                    "already running the latest",
+                    "is the latest version",
+                    "no update available",
+                    "no updates available",
+                ];
+                NATIVE_MARKERS.iter().any(|m| line.contains(m))
+            }
+            UpdateOwner::NpmGlobal { .. } => {
+                line.contains("up to date")
+                    || line.contains("up-to-date")
+                    || line.contains("changed 0 packages")
+            }
+            UpdateOwner::HomebrewCask { cask_token, .. } => {
+                let cask_lower = cask_token.to_ascii_lowercase();
+                line.contains(&format!("{cask_lower} {ver_lower} is already installed"))
+                    || line.contains("already installed and up-to-date")
+                    || line.contains("already installed")
+                    || line.contains("not upgraded")
+            }
+            UpdateOwner::HomebrewFormula { formula, .. } => {
+                let formula_lower = formula.to_ascii_lowercase();
+                line.contains(&format!("{formula_lower} {ver_lower} already installed"))
+                    || line.contains("already installed and up-to-date")
+                    || line.contains("already installed")
+                    || line.contains("not upgraded")
+            }
+            UpdateOwner::WinGet { .. } => {
+                line.contains("no available upgrade found")
+                    || line.contains("no newer package versions are available")
+            }
+            UpdateOwner::CodexStandalone { .. } => {
+                line.contains(&format!("codex cli {ver_lower} installed successfully"))
+                    || line.contains("already up to date")
+                    || line.contains("already installed")
+            }
+            UpdateOwner::ManualActionRequired { .. } => false,
+        };
+        if matched {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn updater_output_confirms_updated(text: &str, active_version: &str) -> bool {
+    if updater_output_has_negation_or_failure(text) {
+        return false;
+    }
     let lower = text.to_ascii_lowercase();
     let ver_lower = active_version.to_ascii_lowercase();
     lower.contains(&format!("updated to {ver_lower}"))

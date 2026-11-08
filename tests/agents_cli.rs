@@ -37,10 +37,27 @@ fn setup_codex_standalone(
         format!(r#"{{"version":"{version}","channel":"stable"}}"#),
     )
     .unwrap();
-    sb.install_fake_tool(
-        "codex",
-        &[("version_stdout", &format!("codex-cli {version}"))],
-    )
+    #[cfg(unix)]
+    {
+        let release_bin_dir = release_dir.join("bin");
+        let (target_bin, cfg_path) = sb.install_fake_tool_in(
+            &release_bin_dir,
+            "codex",
+            &[("version_stdout", &format!("codex-cli {version}"))],
+        );
+        let launcher_path = sb.bin_dir.join("codex");
+        let _ = fs::remove_file(&launcher_path);
+        std::os::unix::fs::symlink(&target_bin, &launcher_path).unwrap();
+        (launcher_path, cfg_path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(sb.bin_dir.join("rg.exe"), "MZ").unwrap();
+        sb.install_fake_tool(
+            "codex",
+            &[("version_stdout", &format!("codex-cli {version}"))],
+        )
+    }
 }
 
 #[test]
@@ -460,11 +477,25 @@ fn agents_update_codex_npm_global_positive() {
     )
     .unwrap();
 
-    let (_, codex_cfg) = sb.install_fake_tool_in(
-        &npm_bin_dir,
+    let (pkg_codex, codex_cfg) = sb.install_fake_tool_in(
+        &pkg_dir.join("bin"),
         "codex",
         &[("version_stdout", "codex-cli 0.118.0")],
     );
+    fs::create_dir_all(&npm_bin_dir).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&pkg_codex, npm_bin_dir.join("codex")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            npm_bin_dir.join("codex.cmd"),
+            format!(
+                "@echo off\r\nREM @openai/codex node_modules\r\n\"{}\" %*\r\n",
+                pkg_codex.display()
+            ),
+        )
+        .unwrap();
+    }
     sb.install_fake_tool_in(
         &npm_bin_dir,
         "npm",
@@ -503,16 +534,31 @@ fn agents_update_codex_homebrew_cask_positive() {
     let brew_bin_dir = brew_prefix.join("bin");
     let cask_dir = brew_prefix.join("Caskroom").join("codex").join("0.118.0");
     fs::create_dir_all(&cask_dir).unwrap();
+    fs::create_dir_all(&brew_bin_dir).unwrap();
 
-    let (_, codex_cfg) = sb.install_fake_tool_in(
-        &brew_bin_dir,
+    let (cask_codex, codex_cfg) = sb.install_fake_tool_in(
+        &cask_dir,
         "codex",
         &[("version_stdout", "codex-cli 0.118.0")],
     );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cask_codex, brew_bin_dir.join("codex")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            brew_bin_dir.join("codex.cmd"),
+            format!(
+                "@echo off\r\nREM Caskroom\\codex\r\n\"{}\" %*\r\n",
+                cask_codex.display()
+            ),
+        )
+        .unwrap();
+    }
     sb.install_fake_tool_in(
         &brew_bin_dir,
         "brew",
         &[
+            ("prefix_stdout", &brew_prefix.to_string_lossy()),
             ("list_stdout", "codex"),
             ("next_version_stdout", "codex-cli 0.119.0"),
             ("target_cfg_path", &codex_cfg.to_string_lossy()),
@@ -678,16 +724,31 @@ fn agents_update_claude_code_managed_and_negative_ownership_boundaries() {
         .join("claude-code@latest")
         .join("2.1.0");
     fs::create_dir_all(&cask_dir).unwrap();
+    fs::create_dir_all(&brew_bin_dir).unwrap();
 
-    let (_, claude_cfg) = sb_brew.install_fake_tool_in(
-        &brew_bin_dir,
+    let (cask_claude, claude_cfg) = sb_brew.install_fake_tool_in(
+        &cask_dir,
         "claude",
         &[("version_stdout", "2.1.0 (Claude Code)")],
     );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cask_claude, brew_bin_dir.join("claude")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            brew_bin_dir.join("claude.cmd"),
+            format!(
+                "@echo off\r\nREM Caskroom\\claude-code@latest\r\n\"{}\" %*\r\n",
+                cask_claude.display()
+            ),
+        )
+        .unwrap();
+    }
     sb_brew.install_fake_tool_in(
         &brew_bin_dir,
         "brew",
         &[
+            ("prefix_stdout", &brew_prefix.to_string_lossy()),
             ("list_stdout", "claude-code@latest"),
             ("next_version_stdout", "2.2.0 (Claude Code)"),
             ("target_cfg_path", &claude_cfg.to_string_lossy()),
@@ -763,11 +824,25 @@ fn agents_update_claude_code_managed_and_negative_ownership_boundaries() {
         .join("claude-code")
         .join("2.1.0");
     fs::create_dir_all(&missing_cask_dir).unwrap();
-    sb_missing_mgr.install_fake_tool_in(
-        &missing_brew_bin,
+    fs::create_dir_all(&missing_brew_bin).unwrap();
+    let (missing_cask_claude, _) = sb_missing_mgr.install_fake_tool_in(
+        &missing_cask_dir,
         "claude",
         &[("version_stdout", "2.1.0 (Claude Code)")],
     );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&missing_cask_claude, missing_brew_bin.join("claude")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            missing_brew_bin.join("claude.cmd"),
+            format!(
+                "@echo off\r\nREM Caskroom\\claude-code\r\n\"{}\" %*\r\n",
+                missing_cask_claude.display()
+            ),
+        )
+        .unwrap();
+    }
 
     let out_missing =
         sb_missing_mgr.run_teemiao(&["agents", "update", "claude"], &[&missing_brew_bin], &[]);
@@ -930,4 +1005,327 @@ fn agents_list_handles_empty_and_nonexistent_path_entries() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Claude Code (claude-code)"));
     assert!(stdout.contains("2.1.0"));
+}
+
+#[test]
+fn agents_cursor_rejects_cursor_prefixed_dir_conflicting_banner_and_loose_package_json() {
+    // 1. `cursor-tools/bin/agent` printing `Datadog Agent 7.50.0` must be rejected
+    let sb = TestSandbox::new();
+    let cursor_tools_bin = sb.root.join("cursor-tools").join("bin");
+    sb.install_fake_tool_in(
+        &cursor_tools_bin,
+        "agent",
+        &[
+            ("version_stdout", "Datadog Agent 7.50.0"),
+            ("help_stdout", "Datadog monitoring agent"),
+            ("update_stdout", "WRONG_AGENT_UPDATED"),
+        ],
+    );
+    let out = sb.run_teemiao(&["agents", "update", "cursor"], &[&cursor_tools_bin], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not installed"),
+        "expected not installed for non-Cursor agent in cursor-tools/bin: {stderr}"
+    );
+    assert!(
+        !sb.invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=agent|ARGS=update|")),
+        "must never run 'agent update' on non-Cursor binary: {:?}",
+        sb.invocations()
+    );
+
+    // 2. Conflicting product banner (`Datadog Agent 7.50.0`) inside `.cursor/bin/agent` must still be rejected
+    let sb_conflict = TestSandbox::new();
+    let dot_cursor_bin = sb_conflict.home.join(".cursor").join("bin");
+    sb_conflict.install_fake_tool_in(
+        &dot_cursor_bin,
+        "agent",
+        &[
+            ("version_stdout", "Datadog Agent 7.50.0"),
+            ("help_stdout", "Datadog monitoring agent"),
+            ("update_stdout", "WRONG_AGENT_UPDATED"),
+        ],
+    );
+    let out_conflict =
+        sb_conflict.run_teemiao(&["agents", "update", "cursor"], &[&dot_cursor_bin], &[]);
+    assert_eq!(out_conflict.status.code(), Some(1));
+    assert!(
+        !sb_conflict
+            .invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=agent|ARGS=update|")),
+        "conflicting product banner in .cursor/bin must never be executed for update"
+    );
+
+    // 3. Adjacent `package.json` mentioning `"cursor"` only in description (not `"name"`) must be rejected
+    let sb_pkg = TestSandbox::new();
+    let pkg_bin = sb_pkg.root.join("custom-agent").join("bin");
+    fs::create_dir_all(&pkg_bin).unwrap();
+    fs::write(
+        sb_pkg.root.join("custom-agent").join("package.json"),
+        r#"{"name":"acme-agent","description":"moves terminal cursor","version":"1.2.0"}"#,
+    )
+    .unwrap();
+    sb_pkg.install_fake_tool_in(
+        &pkg_bin,
+        "agent",
+        &[
+            ("version_stdout", "1.2.0"),
+            ("help_stdout", "Usage: agent [options]"),
+        ],
+    );
+    let out_pkg = sb_pkg.run_teemiao(&["agents", "list"], &[&pkg_bin], &[]);
+    assert_eq!(out_pkg.status.code(), Some(0));
+    let stdout_pkg = String::from_utf8_lossy(&out_pkg.stdout);
+    assert!(
+        stdout_pkg.contains("No supported AI coding-agent CLIs were found on PATH."),
+        "incidental 'cursor' substring in package.json description must not authorize agent: {stdout_pkg}"
+    );
+}
+
+#[test]
+fn agents_homebrew_multi_prefix_selects_owning_brew_executable_and_rejects_mismatch() {
+    let sb = TestSandbox::new();
+    let other_brew_prefix = sb.root.join("other-brew");
+    let other_brew_bin = other_brew_prefix.join("bin");
+    let owner_brew_prefix = sb.root.join("owner-brew");
+    let owner_brew_bin = owner_brew_prefix.join("bin");
+    let cask_dir = owner_brew_prefix
+        .join("Caskroom")
+        .join("codex")
+        .join("0.118.0");
+    fs::create_dir_all(&cask_dir).unwrap();
+    fs::create_dir_all(&owner_brew_bin).unwrap();
+
+    let (cask_codex, codex_cfg) = sb.install_fake_tool_in(
+        &cask_dir,
+        "codex",
+        &[("version_stdout", "codex-cli 0.118.0")],
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cask_codex, owner_brew_bin.join("codex")).unwrap();
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            owner_brew_bin.join("codex.cmd"),
+            format!(
+                "@echo off\r\nREM Caskroom\\codex\r\n\"{}\" %*\r\n",
+                cask_codex.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    // Install `brew` in `other_brew_bin` (which comes FIRST on PATH) and in `owner_brew_bin`
+    sb.install_fake_tool_in(
+        &other_brew_bin,
+        "brew",
+        &[
+            ("prefix_stdout", &other_brew_prefix.to_string_lossy()),
+            ("update_stderr", "wrong brew prefix used"),
+            ("update_exit", "1"),
+        ],
+    );
+    let (owner_brew_exe, _) = sb.install_fake_tool_in(
+        &owner_brew_bin,
+        "brew",
+        &[
+            ("prefix_stdout", &owner_brew_prefix.to_string_lossy()),
+            ("list_stdout", "codex"),
+            ("next_version_stdout", "codex-cli 0.119.0"),
+            ("target_cfg_path", &codex_cfg.to_string_lossy()),
+            ("update_stdout", "==> Upgrading 1 outdated package: codex"),
+        ],
+    );
+
+    let out = sb.run_teemiao(
+        &["agents", "update", "codex", "--dry-run"],
+        &[&other_brew_bin, &owner_brew_bin],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&owner_brew_exe.display().to_string()),
+        "expected dry-run plan to select owner_brew_bin/brew ({}), got: {stdout}",
+        owner_brew_exe.display()
+    );
+    assert!(
+        !stdout.contains(&other_brew_bin.display().to_string()),
+        "dry-run plan must not select other-brew/bin/brew: {stdout}"
+    );
+}
+
+#[test]
+fn agents_rejects_unrelated_launchers_with_nearby_npm_standalone_or_homebrew_metadata() {
+    // 1. Unrelated regular executable in `prefix/bin/codex` with stale `prefix/lib/node_modules/@openai/codex/package.json`
+    let sb_npm = TestSandbox::new();
+    let npm_prefix = sb_npm.root.join("usr-local");
+    let npm_bin = npm_prefix.join("bin");
+    let pkg_dir = npm_prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"@openai/codex","version":"0.118.0"}"#,
+    )
+    .unwrap();
+    sb_npm.install_fake_tool_in(
+        &npm_bin,
+        "codex",
+        &[("version_stdout", "codex-cli 0.118.0")],
+    );
+    sb_npm.install_fake_tool_in(&npm_bin, "npm", &[("update_stdout", "added 1 package")]);
+
+    let out_npm = sb_npm.run_teemiao(&["agents", "update", "codex"], &[&npm_bin], &[]);
+    assert_eq!(out_npm.status.code(), Some(1));
+    let stdout_npm = String::from_utf8_lossy(&out_npm.stdout);
+    assert!(
+        stdout_npm.contains("manual action required"),
+        "unrelated regular binary in prefix/bin must not be treated as npm-owned: {stdout_npm}"
+    );
+    assert!(
+        !sb_npm
+            .invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=npm|")),
+        "npm must not be executed for unrelated regular binary in prefix/bin"
+    );
+
+    // 2. Unrelated `~/.local/bin/codex` (0.118.0) with stale `.codex/packages/standalone/releases/0.117.0/codex-package.json`
+    let sb_st = TestSandbox::new();
+    let stale_release = sb_st
+        .home
+        .join(".codex")
+        .join("packages")
+        .join("standalone")
+        .join("releases")
+        .join("0.117.0");
+    fs::create_dir_all(&stale_release).unwrap();
+    fs::write(
+        stale_release.join("codex-package.json"),
+        r#"{"version":"0.117.0","channel":"stable"}"#,
+    )
+    .unwrap();
+    sb_st.install_fake_tool("codex", &[("version_stdout", "codex-cli 0.118.0")]);
+    sb_st.install_fake_tool("curl", &[("update_stdout", "curl ran")]);
+
+    let out_st = sb_st.run_teemiao(&["agents", "update", "codex"], &[&sb_st.bin_dir], &[]);
+    assert_eq!(out_st.status.code(), Some(1));
+    let stdout_st = String::from_utf8_lossy(&out_st.stdout);
+    assert!(
+        stdout_st.contains("manual action required"),
+        "unrelated binary in ~/.local/bin with stale standalone metadata must report manual action required: {stdout_st}"
+    );
+    assert!(
+        !sb_st
+            .invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=curl|")),
+        "standalone installer must not run for unrelated ~/.local/bin/codex"
+    );
+
+    // 3. Unrelated regular executable in `homebrew/bin/codex` with nearby `Caskroom/codex`
+    let sb_brew = TestSandbox::new();
+    let brew_prefix = sb_brew.root.join("homebrew");
+    let brew_bin = brew_prefix.join("bin");
+    let cask_dir = brew_prefix.join("Caskroom").join("codex").join("0.117.0");
+    fs::create_dir_all(&cask_dir).unwrap();
+    sb_brew.install_fake_tool_in(
+        &brew_bin,
+        "codex",
+        &[("version_stdout", "codex-cli 0.118.0")],
+    );
+    sb_brew.install_fake_tool_in(
+        &brew_bin,
+        "brew",
+        &[
+            ("prefix_stdout", &brew_prefix.to_string_lossy()),
+            ("list_stdout", "codex"),
+        ],
+    );
+
+    let out_brew = sb_brew.run_teemiao(&["agents", "update", "codex"], &[&brew_bin], &[]);
+    assert_eq!(out_brew.status.code(), Some(1));
+    let stdout_brew = String::from_utf8_lossy(&out_brew.stdout);
+    assert!(
+        stdout_brew.contains("manual action required"),
+        "unrelated regular binary in homebrew/bin must not be treated as Homebrew-owned: {stdout_brew}"
+    );
+}
+
+#[test]
+fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
+    let sb = TestSandbox::new();
+    let pid_file = sb.root.join("grandchild.pid");
+    sb.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("spawn_hold_pipes_ms", "8000"),
+            ("hold_pid_file", &pid_file.to_string_lossy()),
+        ],
+    );
+
+    let start = std::time::Instant::now();
+    let out = sb.run_teemiao(&["agents", "list"], &[&sb.bin_dir], &[]);
+    let elapsed = start.elapsed();
+
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        elapsed < std::time::Duration::from_millis(6500),
+        "probe with pipe-holding child must be bounded by the 5s deadline, took {elapsed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Antigravity (antigravity) | version: unknown"),
+        "timed-out pipe-holding probe must report version unknown: {stdout}"
+    );
+    assert!(
+        stderr.contains("timed out after 5s"),
+        "timed-out pipe-holding probe must emit timeout warning: {stderr}"
+    );
+}
+
+#[test]
+fn agents_update_rejects_negated_error_or_unrelated_up_to_date_messages() {
+    let sb = TestSandbox::new();
+
+    // 1. "Not up to date. Update check failed." must be unverified (exit 1)
+    sb.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("update_stdout", "Not up to date. Update check failed."),
+        ],
+    );
+    let out_neg = sb.run_teemiao(&["agents", "update", "agy"], &[&sb.bin_dir], &[]);
+    assert_eq!(out_neg.status.code(), Some(1));
+    let stdout_neg = String::from_utf8_lossy(&out_neg.stdout);
+    assert!(
+        stdout_neg.contains("unverified"),
+        "negated 'Not up to date' output must be reported as unverified: {stdout_neg}"
+    );
+
+    // 2. Unrelated subject "Dependencies are up to date" must be unverified (exit 1)
+    sb.install_fake_tool(
+        "opencode",
+        &[
+            ("version_stdout", "opencode 0.5.0"),
+            ("update_stdout", "Dependencies are up to date."),
+        ],
+    );
+    let out_dep = sb.run_teemiao(&["agents", "update", "opencode"], &[&sb.bin_dir], &[]);
+    assert_eq!(out_dep.status.code(), Some(1));
+    let stdout_dep = String::from_utf8_lossy(&out_dep.stdout);
+    assert!(
+        stdout_dep.contains("unverified"),
+        "'Dependencies are up to date' must be reported as unverified: {stdout_dep}"
+    );
 }

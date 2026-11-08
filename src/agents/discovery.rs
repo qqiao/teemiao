@@ -218,7 +218,7 @@ impl DiscoveredAgent {
 pub struct PackageManagerCache {
     brew_casks: HashMap<PathBuf, Option<Vec<String>>>,
     brew_formulas: HashMap<PathBuf, Option<Vec<String>>>,
-    brew_prefix: Option<Option<PathBuf>>,
+    brew_prefix: HashMap<PathBuf, Option<PathBuf>>,
     winget_packages: HashMap<String, bool>,
 }
 
@@ -276,20 +276,22 @@ impl PackageManagerCache {
     }
 
     fn brew_prefix(&mut self, brew_bin: &Path, runner: &dyn ProcessRunner) -> Option<PathBuf> {
-        if let Some(ref cached) = self.brew_prefix {
+        if let Some(cached) = self.brew_prefix.get(brew_bin) {
             return cached.clone();
         }
         let output = run_bounded_probe(brew_bin, &["--prefix"], runner).ok();
         let result = output.and_then(|out| {
             if out.success && !out.timed_out && !out.stdout_truncated {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !text.is_empty() {
-                    return Some(PathBuf::from(text));
+                let candidate = PathBuf::from(&text);
+                if !text.is_empty() && candidate.is_absolute() {
+                    return Some(candidate);
                 }
             }
             None
         });
-        self.brew_prefix = Some(result.clone());
+        self.brew_prefix
+            .insert(brew_bin.to_path_buf(), result.clone());
         result
     }
 
@@ -447,8 +449,11 @@ fn try_verify_cursor_agent(
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            if has_conflicting_non_cursor_product(&combined) {
+                return None;
+            }
             let mut branding_verified =
-                has_local_cursor_evidence || contains_cursor_branding(&combined);
+                contains_cursor_branding(&combined) || has_local_cursor_evidence;
 
             if !branding_verified
                 && output.success
@@ -513,26 +518,34 @@ fn try_verify_cursor_agent(
 }
 
 fn path_has_cursor_evidence(path: &Path) -> bool {
-    for component in path.components() {
-        let comp = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        if comp == "cursor"
-            || comp == ".cursor"
-            || comp == "cursor-agent"
-            || comp.starts_with("cursor-")
-        {
-            return true;
-        }
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    if normalized.contains("/.cursor/bin/")
+        || normalized.contains("/cursor.app/contents/resources/app/bin/")
+        || normalized.contains("/programs/cursor/resources/app/bin/")
+        || normalized.contains("/cursor-agent/")
+    {
+        return true;
     }
     if let Some(parent) = path.parent() {
         let marker = parent.join(".cursor-agent");
         if marker.is_file() {
             return true;
         }
-        let pkg_json = parent.join("package.json");
-        if let Ok(contents) = fs::read_to_string(pkg_json)
-            && contents.to_ascii_lowercase().contains("cursor")
-        {
-            return true;
+        for candidate_dir in [Some(parent), parent.parent()].into_iter().flatten() {
+            let pkg_json = candidate_dir.join("package.json");
+            if let Ok(contents) = fs::read_to_string(pkg_json)
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
+                && let Some(name) = val.get("name").and_then(|n| n.as_str())
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "@cursor/agent" | "@anysphere/cursor-agent" | "cursor-agent"
+                )
+            {
+                return true;
+            }
         }
     }
     false
@@ -541,6 +554,37 @@ fn path_has_cursor_evidence(path: &Path) -> bool {
 fn contains_cursor_branding(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("cursor") || lower.contains("anysphere")
+}
+
+fn has_conflicting_non_cursor_product(text: &str) -> bool {
+    if contains_cursor_branding(text) {
+        return false;
+    }
+    for word in text
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|w| !w.is_empty())
+    {
+        let lower = word.to_ascii_lowercase();
+        if !matches!(
+            lower.as_str(),
+            "agent"
+                | "cli"
+                | "version"
+                | "v"
+                | "release"
+                | "build"
+                | "stable"
+                | "beta"
+                | "alpha"
+                | "rc"
+                | "nightly"
+                | "canary"
+                | "preview"
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 fn inspect_candidate(
@@ -1187,7 +1231,7 @@ fn determine_codex_owner(
     runner: &dyn ProcessRunner,
     cache: &mut PackageManagerCache,
 ) -> UpdateOwner {
-    let signals = collect_codex_signals(launcher_path, resolved_path, env, runner, cache);
+    let signals = collect_codex_signals(launcher_path, resolved_path, version, env, runner, cache);
 
     if signals.is_empty() {
         return UpdateOwner::ManualActionRequired {
@@ -1252,10 +1296,10 @@ fn determine_codex_owner(
             brew_prefix,
             cask_token,
         } => {
-            let Some(brew_bin) = find_brew_binary(brew_prefix, env) else {
+            let Some(brew_bin) = find_verified_brew_binary(brew_prefix, env, runner, cache) else {
                 return UpdateOwner::ManualActionRequired {
-                    reason: "active Codex installation is in Homebrew Caskroom, but 'brew' was not found".to_string(),
-                    guidance: format!("Add Homebrew to PATH and run 'brew upgrade --cask {cask_token}'."),
+                    reason: "active Codex installation is in Homebrew Caskroom, but a matching 'brew' executable for this prefix was not found".to_string(),
+                    guidance: format!("Add the owning Homebrew installation to PATH and run 'brew upgrade --cask {cask_token}'."),
                 };
             };
             if let Some(installed_casks) = cache.brew_casks(&brew_bin, runner) {
@@ -1285,12 +1329,12 @@ fn determine_codex_owner(
             brew_prefix,
             formula,
         } => {
-            let Some(brew_bin) = find_brew_binary(brew_prefix, env) else {
+            let Some(brew_bin) = find_verified_brew_binary(brew_prefix, env, runner, cache) else {
                 return UpdateOwner::ManualActionRequired {
                     reason:
-                        "active Codex installation is in Homebrew Cellar, but 'brew' was not found"
+                        "active Codex installation is in Homebrew Cellar, but a matching 'brew' executable for this prefix was not found"
                             .to_string(),
-                    guidance: format!("Add Homebrew to PATH and run 'brew upgrade {formula}'."),
+                    guidance: format!("Add the owning Homebrew installation to PATH and run 'brew upgrade {formula}'."),
                 };
             };
             if let Some(installed_formulas) = cache.brew_formulas(&brew_bin, runner) {
@@ -1366,7 +1410,7 @@ fn determine_claude_owner(
     runner: &dyn ProcessRunner,
     cache: &mut PackageManagerCache,
 ) -> UpdateOwner {
-    let signals = collect_claude_signals(launcher_path, resolved_path, env, runner, cache);
+    let signals = collect_claude_signals(launcher_path, resolved_path, version, env, runner, cache);
 
     if has_contradictory_signals(&signals) {
         return UpdateOwner::ManualActionRequired {
@@ -1427,10 +1471,11 @@ fn determine_claude_owner(
                 brew_prefix,
                 cask_token,
             } => {
-                let Some(brew_bin) = find_brew_binary(brew_prefix, env) else {
+                let Some(brew_bin) = find_verified_brew_binary(brew_prefix, env, runner, cache)
+                else {
                     return UpdateOwner::ManualActionRequired {
-                        reason: "active Claude Code installation is in Homebrew Caskroom, but 'brew' was not found".to_string(),
-                        guidance: format!("Add Homebrew to PATH and run 'brew upgrade --cask {cask_token}'."),
+                        reason: "active Claude Code installation is in Homebrew Caskroom, but a matching 'brew' executable for this prefix was not found".to_string(),
+                        guidance: format!("Add the owning Homebrew installation to PATH and run 'brew upgrade --cask {cask_token}'."),
                     };
                 };
                 if let Some(installed_casks) = cache.brew_casks(&brew_bin, runner) {
@@ -1508,26 +1553,39 @@ fn determine_claude_owner(
 fn collect_codex_signals(
     launcher_path: &Path,
     resolved_path: &Path,
+    active_version: Option<&str>,
     env: &DiscoveryEnv,
     runner: &dyn ProcessRunner,
     cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut signals = Vec::new();
 
-    if let Some(npm_sig) = detect_npm_ownership(launcher_path, resolved_path, "@openai/codex") {
+    if let Some(npm_sig) = detect_npm_ownership(
+        launcher_path,
+        resolved_path,
+        active_version,
+        "@openai/codex",
+        env.is_windows,
+    ) {
         signals.push(npm_sig);
     }
 
-    for brew_sig in
-        detect_homebrew_ownership(launcher_path, resolved_path, "codex", env, runner, cache)
-    {
+    for brew_sig in detect_homebrew_ownership(
+        launcher_path,
+        resolved_path,
+        active_version,
+        "codex",
+        env,
+        runner,
+        cache,
+    ) {
         if !signals.contains(&brew_sig) {
             signals.push(brew_sig);
         }
     }
 
     if let Some(standalone_sig) =
-        detect_codex_standalone_ownership(launcher_path, resolved_path, env)
+        detect_codex_standalone_ownership(launcher_path, resolved_path, active_version, env)
     {
         signals.push(standalone_sig);
     }
@@ -1546,21 +1604,32 @@ fn collect_codex_signals(
 fn collect_claude_signals(
     launcher_path: &Path,
     resolved_path: &Path,
+    active_version: Option<&str>,
     env: &DiscoveryEnv,
     runner: &dyn ProcessRunner,
     cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut signals = Vec::new();
 
-    if let Some(npm_sig) =
-        detect_npm_ownership(launcher_path, resolved_path, "@anthropic-ai/claude-code")
-    {
+    if let Some(npm_sig) = detect_npm_ownership(
+        launcher_path,
+        resolved_path,
+        active_version,
+        "@anthropic-ai/claude-code",
+        env.is_windows,
+    ) {
         signals.push(npm_sig);
     }
 
-    for brew_sig in
-        detect_homebrew_ownership(launcher_path, resolved_path, "claude", env, runner, cache)
-    {
+    for brew_sig in detect_homebrew_ownership(
+        launcher_path,
+        resolved_path,
+        active_version,
+        "claude",
+        env,
+        runner,
+        cache,
+    ) {
         if !signals.contains(&brew_sig) {
             signals.push(brew_sig);
         }
@@ -1592,21 +1661,41 @@ fn has_contradictory_signals(signals: &[ManagerSignal]) -> bool {
         .any(|s| s != first || s.kind_tag() != first.kind_tag())
 }
 
+fn prefer_launcher_prefix(launcher_path: &Path, prefix: PathBuf, is_windows: bool) -> PathBuf {
+    if let Some(bin_dir) = launcher_path.parent() {
+        if bin_dir
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+            && let Some(launcher_prefix) = bin_dir.parent()
+            && paths_refer_to_same_dir(launcher_prefix, &prefix, is_windows)
+        {
+            return launcher_prefix.to_path_buf();
+        }
+        if paths_refer_to_same_dir(bin_dir, &prefix, is_windows) {
+            return bin_dir.to_path_buf();
+        }
+    }
+    prefix
+}
+
 /// Checks if `launcher_path` or `resolved_path` is owned by an npm global installation
 /// of `expected_pkg` (e.g. `@openai/codex` or `@anthropic-ai/claude-code`).
 fn detect_npm_ownership(
     launcher_path: &Path,
     resolved_path: &Path,
+    active_version: Option<&str>,
     expected_pkg: &str,
+    is_windows: bool,
 ) -> Option<ManagerSignal> {
     let pkg_parts: Vec<&str> = expected_pkg.split('/').collect();
 
     for path in [resolved_path, launcher_path] {
         if let Some((prefix, pkg_root)) = extract_npm_prefix_from_node_modules(path, &pkg_parts)
-            && verify_package_json_name(&pkg_root, expected_pkg)
+            && verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
         {
+            let clean_prefix = prefer_launcher_prefix(launcher_path, prefix, is_windows);
             return Some(ManagerSignal::Npm {
-                prefix,
+                prefix: clean_prefix,
                 package: expected_pkg.to_string(),
             });
         }
@@ -1614,7 +1703,7 @@ fn detect_npm_ownership(
 
     // Check if launcher_path is in `<prefix>/bin/<cmd>` (Unix) or `<prefix>/<cmd>[.cmd]` (Windows)
     // with a matching `<prefix>/lib/node_modules/<expected_pkg>/package.json` or
-    // `<prefix>/node_modules/<expected_pkg>/package.json` AND launcher references node/node_modules.
+    // `<prefix>/node_modules/<expected_pkg>/package.json` AND launcher is tied to that package.
     if let Some(bin_dir) = launcher_path.parent() {
         let candidate_prefixes = if bin_dir
             .file_name()
@@ -1628,10 +1717,6 @@ fn detect_npm_ownership(
             vec![Some(bin_dir.to_path_buf())]
         };
 
-        let launcher_is_regular_file = fs::symlink_metadata(launcher_path)
-            .map(|m| !m.file_type().is_symlink())
-            .unwrap_or(false);
-
         for prefix_opt in candidate_prefixes.into_iter().flatten() {
             for rel_base in [
                 prefix_opt.join("lib").join("node_modules"),
@@ -1642,12 +1727,10 @@ fn detect_npm_ownership(
                     pkg_root = pkg_root.join(part);
                 }
                 let canon_pkg_root = canonicalize_clean(&pkg_root);
-                if verify_package_json_name(&pkg_root, expected_pkg)
+                if verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
                     && (launcher_references_npm_or_node(launcher_path, expected_pkg)
                         || resolved_path.starts_with(&pkg_root)
-                        || resolved_path.starts_with(&canon_pkg_root)
-                        || resolved_path == launcher_path
-                        || launcher_is_regular_file)
+                        || resolved_path.starts_with(&canon_pkg_root))
                 {
                     return Some(ManagerSignal::Npm {
                         prefix: prefix_opt,
@@ -1697,7 +1780,11 @@ fn extract_npm_prefix_from_node_modules(
     None
 }
 
-fn verify_package_json_name(pkg_root: &Path, expected_pkg: &str) -> bool {
+fn verify_package_json_name_and_version(
+    pkg_root: &Path,
+    expected_pkg: &str,
+    active_version: Option<&str>,
+) -> bool {
     let pkg_json_path = pkg_root.join("package.json");
     let Ok(contents) = fs::read_to_string(pkg_json_path) else {
         return false;
@@ -1705,9 +1792,24 @@ fn verify_package_json_name(pkg_root: &Path, expected_pkg: &str) -> bool {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return false;
     };
-    val.get("name")
+    let name_matches = val
+        .get("name")
         .and_then(|n| n.as_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(expected_pkg))
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected_pkg));
+    if !name_matches {
+        return false;
+    }
+    if let Some(active_ver) = active_version
+        && let Some(pkg_ver) = val.get("version").and_then(|v| v.as_str())
+    {
+        let parsed_pkg_ver = parse_version_text(pkg_ver);
+        if parsed_pkg_ver.as_deref() != Some(active_ver)
+            && !pkg_ver.eq_ignore_ascii_case(active_ver)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
@@ -1749,17 +1851,19 @@ fn launcher_references_npm_or_node(launcher_path: &Path, expected_pkg: &str) -> 
 fn detect_homebrew_ownership(
     launcher_path: &Path,
     resolved_path: &Path,
+    active_version: Option<&str>,
     agent_key: &str,
     env: &DiscoveryEnv,
-    runner: &dyn ProcessRunner,
-    cache: &mut PackageManagerCache,
+    _runner: &dyn ProcessRunner,
+    _cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut out = Vec::new();
 
     for path in [resolved_path, launcher_path] {
         if let Some((brew_prefix, cask_token)) = extract_homebrew_dir_token(path, "Caskroom") {
+            let clean_prefix = prefer_launcher_prefix(launcher_path, brew_prefix, env.is_windows);
             let sig = ManagerSignal::HomebrewCask {
-                brew_prefix,
+                brew_prefix: clean_prefix,
                 cask_token,
             };
             if !out.contains(&sig) {
@@ -1767,8 +1871,9 @@ fn detect_homebrew_ownership(
             }
         }
         if let Some((brew_prefix, formula)) = extract_homebrew_dir_token(path, "Cellar") {
+            let clean_prefix = prefer_launcher_prefix(launcher_path, brew_prefix, env.is_windows);
             let sig = ManagerSignal::HomebrewFormula {
-                brew_prefix,
+                brew_prefix: clean_prefix,
                 formula,
             };
             if !out.contains(&sig) {
@@ -1782,16 +1887,17 @@ fn detect_homebrew_ownership(
     }
 
     // If launcher_path is `<brew_prefix>/bin/<cmd>` (not directly resolved inside Caskroom/Cellar),
-    // inspect `<brew_prefix>/Caskroom` or query `brew` if `<brew_prefix>` is confirmed.
+    // require explicit Homebrew wrapper evidence in `launcher_path` before attributing ownership.
     if let Some(bin_dir) = launcher_path.parent()
         && bin_dir
             .file_name()
             .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
         && let Some(prefix) = bin_dir.parent()
+        && launcher_references_homebrew(launcher_path)
     {
         let caskroom = prefix.join("Caskroom");
         if caskroom.is_dir() {
-            let matching_casks = find_matching_casks_in_dir(&caskroom, agent_key);
+            let matching_casks = find_matching_casks_in_dir(&caskroom, agent_key, active_version);
             for cask_token in matching_casks {
                 out.push(ManagerSignal::HomebrewCask {
                     brew_prefix: prefix.to_path_buf(),
@@ -1806,24 +1912,17 @@ fn detect_homebrew_ownership(
                 formula: agent_key.to_string(),
             });
         }
-
-        if out.is_empty()
-            && is_confirmed_brew_prefix(prefix, env, runner, cache)
-            && let Some(brew_bin) = find_brew_binary(prefix, env)
-            && let Some(casks) = cache.brew_casks(&brew_bin, runner)
-        {
-            for cask in casks {
-                if cask_matches_agent(&cask, agent_key) {
-                    out.push(ManagerSignal::HomebrewCask {
-                        brew_prefix: prefix.to_path_buf(),
-                        cask_token: cask,
-                    });
-                }
-            }
-        }
     }
 
     out
+}
+
+fn launcher_references_homebrew(launcher_path: &Path) -> bool {
+    let Ok(bytes) = fs::read(launcher_path) else {
+        return false;
+    };
+    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
+    sample.contains("caskroom") || sample.contains("cellar") || sample.contains("homebrew")
 }
 
 fn extract_homebrew_dir_token(path: &Path, marker_dir: &str) -> Option<(PathBuf, String)> {
@@ -1843,21 +1942,51 @@ fn extract_homebrew_dir_token(path: &Path, marker_dir: &str) -> Option<(PathBuf,
     None
 }
 
-fn find_matching_casks_in_dir(caskroom: &Path, agent_key: &str) -> Vec<String> {
+fn find_matching_casks_in_dir(
+    caskroom: &Path,
+    agent_key: &str,
+    active_version: Option<&str>,
+) -> Vec<String> {
     let Ok(entries) = fs::read_dir(caskroom) else {
         return Vec::new();
     };
     let mut matches = Vec::new();
     for entry in entries.flatten() {
-        if entry.path().is_dir() {
+        let cask_path = entry.path();
+        if cask_path.is_dir() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if cask_matches_agent(&name, agent_key) {
+            if cask_matches_agent(&name, agent_key)
+                && cask_dir_matches_version(&cask_path, active_version)
+            {
                 matches.push(name);
             }
         }
     }
     matches.sort();
     matches
+}
+
+fn cask_dir_matches_version(cask_path: &Path, active_version: Option<&str>) -> bool {
+    let Some(active_ver) = active_version else {
+        return true;
+    };
+    if cask_path.join(active_ver).is_dir() || cask_path.join("latest").is_dir() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(cask_path) else {
+        return false;
+    };
+    let mut has_version_subdirs = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && entry.path().is_dir() {
+            has_version_subdirs = true;
+            if parse_version_text(&name).as_deref() == Some(active_ver) {
+                return true;
+            }
+        }
+    }
+    !has_version_subdirs
 }
 
 fn cask_matches_agent(cask_name: &str, agent_key: &str) -> bool {
@@ -1870,36 +1999,45 @@ fn cask_matches_agent(cask_name: &str, agent_key: &str) -> bool {
     }
 }
 
-fn is_confirmed_brew_prefix(
-    candidate_prefix: &Path,
+fn find_verified_brew_binary(
+    brew_prefix: &Path,
     env: &DiscoveryEnv,
     runner: &dyn ProcessRunner,
     cache: &mut PackageManagerCache,
-) -> bool {
+) -> Option<PathBuf> {
+    // 1. Prefer the `brew` binary inside `<brew_prefix>/bin` (or matching `HOMEBREW_PREFIX/bin`) when present.
+    let mut candidate_bins = vec![brew_prefix.join("bin")];
     if let Some(ref hb) = env.homebrew_prefix
-        && paths_refer_to_same_dir(candidate_prefix, hb, env.is_windows)
+        && paths_refer_to_same_dir(hb, brew_prefix, env.is_windows)
     {
-        return true;
+        candidate_bins.push(hb.join("bin"));
     }
-    if candidate_prefix.join("bin").join("brew").is_file() {
-        return true;
+    for prefix_bin in candidate_bins {
+        if let Some(prefix_brew) = find_executable_in_dir(&prefix_bin, "brew", env) {
+            if env.is_windows && is_unsafe_windows_cmd_shim(&prefix_brew) {
+                return None;
+            }
+            if let Some(reported_prefix) = cache.brew_prefix(&prefix_brew, runner)
+                && !paths_refer_to_same_dir(&reported_prefix, brew_prefix, env.is_windows)
+            {
+                return None;
+            }
+            return Some(prefix_brew);
+        }
     }
-    if let Some((brew_bin, _)) = resolve_executable_on_path("brew", env)
-        && let Some(queried_prefix) = cache.brew_prefix(&brew_bin, runner)
-    {
-        return paths_refer_to_same_dir(candidate_prefix, &queried_prefix, env.is_windows);
-    }
-    false
-}
 
-fn find_brew_binary(brew_prefix: &Path, env: &DiscoveryEnv) -> Option<PathBuf> {
-    if let Some((brew_on_path, _)) = resolve_executable_on_path("brew", env) {
-        return Some(brew_on_path);
+    // 2. Fall back to `brew` on PATH only if `brew --prefix` confirms it manages `brew_prefix`.
+    if let Some((path_brew, _)) = resolve_executable_on_path("brew", env) {
+        if env.is_windows && is_unsafe_windows_cmd_shim(&path_brew) {
+            return None;
+        }
+        if let Some(reported_prefix) = cache.brew_prefix(&path_brew, runner)
+            && paths_refer_to_same_dir(&reported_prefix, brew_prefix, env.is_windows)
+        {
+            return Some(path_brew);
+        }
     }
-    let prefix_brew = brew_prefix.join("bin").join("brew");
-    if is_runnable_file(&prefix_brew, env.is_windows) {
-        return Some(prefix_brew);
-    }
+
     None
 }
 
@@ -1929,6 +2067,7 @@ fn detect_winget_claude_ownership(
 fn detect_codex_standalone_ownership(
     launcher_path: &Path,
     resolved_path: &Path,
+    active_version: Option<&str>,
     env: &DiscoveryEnv,
 ) -> Option<ManagerSignal> {
     let bin_dir = launcher_path.parent()?.to_path_buf();
@@ -1936,7 +2075,7 @@ fn detect_codex_standalone_ownership(
     // Case 1: resolved_path or launcher_path points into `<codex_home>/packages/standalone/...`
     for path in [resolved_path, launcher_path] {
         if let Some((codex_home, release_or_current_dir)) = extract_codex_standalone_root(path)
-            && is_valid_codex_standalone_tree(&codex_home, &release_or_current_dir)
+            && is_valid_codex_standalone_tree(&codex_home, &release_or_current_dir, active_version)
         {
             return Some(ManagerSignal::CodexStandalone {
                 bin_dir,
@@ -1945,49 +2084,47 @@ fn detect_codex_standalone_ownership(
         }
     }
 
-    // Case 2: launcher_path is in `<codex_home>/packages/standalone/...` or in the expected
-    // standalone bin dir with a valid `<codex_home>/packages/standalone/{current,releases/*}` layout.
-    if let Some(codex_home) = env.effective_codex_home() {
+    // Case 2: launcher_path is in the expected standalone bin dir AND has standalone launcher proof
+    // (`launcher_references_codex_standalone` or Windows `rg.exe` companion) AND `<codex_home>`
+    // has standalone release metadata matching `active_version`.
+    if let Some(codex_home) = env.effective_codex_home()
+        && has_matching_codex_standalone_layout(&codex_home, active_version)
+    {
         let standalone_root = codex_home.join("packages").join("standalone");
-        if has_valid_codex_standalone_layout(&codex_home) {
-            let canon_standalone = canonicalize_clean(&standalone_root);
-            if resolved_path.starts_with(&canon_standalone)
-                || resolved_path.starts_with(&standalone_root)
-            {
-                return Some(ManagerSignal::CodexStandalone {
-                    bin_dir,
-                    codex_home,
-                });
-            }
-            if let Some(expected_bin) = env.expected_codex_bin_dir()
-                && paths_refer_to_same_dir(&bin_dir, &expected_bin, env.is_windows)
-                && (bin_dir.join("codex").exists() || bin_dir.join("codex.exe").exists())
-            {
-                return Some(ManagerSignal::CodexStandalone {
-                    bin_dir,
-                    codex_home,
-                });
-            }
+        let canon_standalone = canonicalize_clean(&standalone_root);
+        if resolved_path.starts_with(&canon_standalone)
+            || resolved_path.starts_with(&standalone_root)
+        {
+            return Some(ManagerSignal::CodexStandalone {
+                bin_dir,
+                codex_home,
+            });
+        }
+        let has_windows_companion = env.is_windows
+            && bin_dir.join("codex.exe").is_file()
+            && bin_dir.join("rg.exe").is_file();
+        if let Some(expected_bin) = env.expected_codex_bin_dir()
+            && paths_refer_to_same_dir(&bin_dir, &expected_bin, env.is_windows)
+            && (launcher_references_codex_standalone(launcher_path) || has_windows_companion)
+        {
+            return Some(ManagerSignal::CodexStandalone {
+                bin_dir,
+                codex_home,
+            });
         }
     }
 
-    // Case 3: Windows legacy standalone bin layout (`codex.exe` + `rg.exe` in `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`)
-    if env.is_windows
-        && let Some(expected_bin) = env.expected_codex_bin_dir()
-        && paths_refer_to_same_dir(&bin_dir, &expected_bin, true)
-        && bin_dir.join("codex.exe").is_file()
-        && bin_dir.join("rg.exe").is_file()
-    {
-        let codex_home = env
-            .effective_codex_home()
-            .unwrap_or_else(|| bin_dir.join(".codex"));
-        return Some(ManagerSignal::CodexStandalone {
-            bin_dir,
-            codex_home,
-        });
-    }
-
     None
+}
+
+fn launcher_references_codex_standalone(launcher_path: &Path) -> bool {
+    let Ok(bytes) = fs::read(launcher_path) else {
+        return false;
+    };
+    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
+    sample.contains("packages/standalone")
+        || sample.contains("packages\\standalone")
+        || sample.contains("codex-package.json")
 }
 
 fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -2022,17 +2159,27 @@ fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-fn has_valid_codex_standalone_layout(codex_home: &Path) -> bool {
+fn has_matching_codex_standalone_layout(codex_home: &Path, active_version: Option<&str>) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     let current_dir = standalone_root.join("current");
-    if current_dir.is_dir() && is_valid_codex_standalone_tree(codex_home, &current_dir) {
+    if current_dir.is_dir()
+        && is_valid_codex_standalone_tree(codex_home, &current_dir, active_version)
+    {
         return true;
     }
     let releases_dir = standalone_root.join("releases");
+    if let Some(active_ver) = active_version {
+        let ver_dir = releases_dir.join(active_ver);
+        if ver_dir.is_dir() && is_valid_codex_standalone_tree(codex_home, &ver_dir, active_version)
+        {
+            return true;
+        }
+        return false;
+    }
     if let Ok(entries) = fs::read_dir(&releases_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && is_valid_codex_standalone_tree(codex_home, &path) {
+            if path.is_dir() && is_valid_codex_standalone_tree(codex_home, &path, None) {
                 return true;
             }
         }
@@ -2040,13 +2187,33 @@ fn has_valid_codex_standalone_layout(codex_home: &Path) -> bool {
     false
 }
 
-fn is_valid_codex_standalone_tree(codex_home: &Path, release_dir: &Path) -> bool {
+fn is_valid_codex_standalone_tree(
+    codex_home: &Path,
+    release_dir: &Path,
+    active_version: Option<&str>,
+) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     if !standalone_root.is_dir() {
         return false;
     }
-    release_dir.join("codex-package.json").is_file()
-        || release_dir.join("codex-path").join("rg").is_file()
+    let pkg_json = release_dir.join("codex-package.json");
+    if pkg_json.is_file() {
+        let Ok(contents) = fs::read_to_string(&pkg_json) else {
+            return false;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            return false;
+        };
+        if let Some(active_ver) = active_version
+            && let Some(pkg_ver) = val.get("version").and_then(|v| v.as_str())
+            && parse_version_text(pkg_ver).as_deref() != Some(active_ver)
+            && !pkg_ver.eq_ignore_ascii_case(active_ver)
+        {
+            return false;
+        }
+        return true;
+    }
+    release_dir.join("codex-path").join("rg").is_file()
         || release_dir.join("codex-path").join("rg.exe").is_file()
         || release_dir.join("codex-resources").join("rg").is_file()
         || release_dir.join("codex-resources").join("rg.exe").is_file()

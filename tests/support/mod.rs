@@ -32,7 +32,7 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +40,20 @@ fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().collect();
     let arg0 = raw_args.first().cloned().unwrap_or_default();
     let args = &raw_args[1..];
+
+    if args.first().map(String::as_str) == Some("--internal-hold-pipes-ms") {
+        if let Some(pid_file) = args.get(2) {
+            if !pid_file.is_empty() {
+                let _ = fs::write(pid_file, format!("{}", std::process::id()));
+            }
+        }
+        let ms = args
+            .get(1)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(7000);
+        thread::sleep(Duration::from_millis(ms));
+        return ExitCode::from(0);
+    }
 
     let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from(&arg0));
     let arg0_path = PathBuf::from(&arg0);
@@ -74,6 +88,17 @@ fn main() -> ExitCode {
     let is_prefix = args.iter().any(|a| a == "--prefix") && !args.iter().any(|a| a == "install");
 
     if is_version {
+        if let Some(hold_ms) = cfg.get("spawn_hold_pipes_ms") {
+            let pid_file = cfg.get("hold_pid_file").map(String::as_str).unwrap_or("");
+            let _ = Command::new(&exe_path)
+                .arg("--internal-hold-pipes-ms")
+                .arg(hold_ms)
+                .arg(pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn();
+        }
         if let Some(ms) = cfg.get("version_sleep_ms").and_then(|v| v.parse::<u64>().ok()) {
             thread::sleep(Duration::from_millis(ms));
         }
@@ -226,7 +251,7 @@ fn update_cfg_version(cfg_path: &Path, next_ver: &str) {
 fn compiled_fake_tool_binary() -> &'static Path {
     FAKE_TOOL_BIN.get_or_init(|| {
         let pid = std::process::id();
-        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-{pid}"));
+        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-v2-{pid}"));
         fs::create_dir_all(&out_dir).expect("create fake tool build dir");
         let src_path = out_dir.join("fake_tool.rs");
         let bin_name = if cfg!(windows) {
@@ -268,7 +293,16 @@ impl TestSandbox {
         let seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("teemiao-cli-test-{pid}-{nanos}-{seq}"));
         let home = root.join("home");
-        let bin_dir = home.join(".local").join("bin");
+        let bin_dir = if cfg!(windows) {
+            home.join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin")
+        } else {
+            home.join(".local").join("bin")
+        };
         let log_file = root.join("invocations.log");
         fs::create_dir_all(&bin_dir).expect("create sandbox bin_dir");
         Self {
@@ -307,6 +341,9 @@ impl TestSandbox {
             .and_then(|s| s.to_str())
             .unwrap_or(name)
             .to_ascii_lowercase();
+        if cfg!(windows) && dir == self.bin_dir && stem == "claude" {
+            let _ = fs::write(dir.join(".claude-native"), "native");
+        }
         let cfg_path = dir.join(format!(".fake_{stem}.cfg"));
         let mut map = BTreeMap::new();
         for &(k, v) in config {
