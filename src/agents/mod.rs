@@ -481,7 +481,6 @@ impl RealProcessRunner {
         child: &mut std::process::Child,
         has_timeout: bool,
     ) -> io::Result<ChildProcessGroup> {
-        let child_pid = child.id();
         #[cfg(windows)]
         {
             let job_handle = if has_timeout {
@@ -493,21 +492,20 @@ impl RealProcessRunner {
             } else {
                 std::ptr::null_mut()
             };
-            Ok(ChildProcessGroup {
-                child_pid,
-                job_handle,
-            })
+            Ok(ChildProcessGroup { job_handle })
         }
         #[cfg(not(windows))]
         {
             let _ = (self, has_timeout);
-            Ok(ChildProcessGroup { child_pid })
+            Ok(ChildProcessGroup {
+                child_pid: child.id(),
+            })
         }
     }
 }
 
 struct ChildProcessGroup {
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg(not(windows))]
     child_pid: u32,
     #[cfg(windows)]
     job_handle: *mut std::ffi::c_void,

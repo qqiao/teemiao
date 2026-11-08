@@ -93,22 +93,32 @@ Do not alter the specification independently; ask the leader about conflicts.
   `tests/agents_cli.rs`, `tests/support/mod.rs`, and both locales (`en`, `zh-CN`);
   verified all `plan.md` commands locally on macOS (`darwin`/`aarch64`) and
   completed all 4 self-reviews (`code-review-and-quality`, `code-simplification`,
-  `security-and-hardening`, `performance-optimization`). Passed 35 unit + 25
-  integration tests (60 total), formatting, strict Clippy for host plus
+  `security-and-hardening`, `performance-optimization`). Passed 37 unit + 25
+  integration tests (62 total), formatting, strict Clippy for host plus
   `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`, and validated the
   Linux/macOS/Windows GitHub Actions matrix on PR #25 (including Windows `.cmd`
-  npm shim parsing, wrapper variable-binding validation, Windows Job Object +
-  process-tree descendant termination across piped output, and cross-platform
+  npm shim parsing, wrapper variable-binding validation, suspended Windows
+  process creation followed by Job Object assignment before resumption,
+  descendant termination across piped output, and cross-platform
   non-executable candidate filtering).
   Dependency: T006.
 
-- [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).
+- [x] **T008 — Independent leader review and GitHub PR** (Leader/Coder).
   Leader reviews code, test quality, security, and requirements coverage. Coder
   fixes findings under the same standards; repeat until the leader accepts.
   Open one PR with the requested description, specification links, validation,
   limitations, and issue reference; report the URL on QQ-8. Do not merge.
   Acceptance: no unresolved material findings; exact reviewed commit identified;
   clear evidence for each success criterion. Dependency: T007.
+  Verification: Leader independently accepted implementation `07a2ff4` on
+  2026-11-08 after reviewing R4/R6-A and R4/R6-B, running all 62 local tests and
+  delivery checks, and inspecting native CI run `42466380585` (62/62 on each
+  platform). Inverting the job-membership guard fails the deterministic cleanup
+  test; restoring it passes. Final review removed the unused Windows PID field
+  instead of suppressing its lint; host and Windows-target strict Clippy, all
+  62 local tests, formatting, build, and patch checks pass after that adjustment.
+  PR #25 targets `main` and records the final revision and current CI evidence:
+  https://github.com/qqiao/teemiao/pull/25. No unresolved material findings.
 
 - [ ] **T009 — Human review of the final delivery** (Qian Qiao).
   Acceptance: leader-validated PR delivered and issue moved to `in_review`;
