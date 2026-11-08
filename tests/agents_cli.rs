@@ -1388,19 +1388,37 @@ fn agents_probe_timeout_bounds_pipe_holding_descendant_processes() {
 
 #[test]
 fn agents_probe_timeout_terminates_running_parent_and_descendant() {
-    // Parent is still running at the 5s deadline AND spawned a pipe-holding descendant
+    // Parent is still running at the 5s deadline, intermediate bridge child exited early after
+    // spawning a pipe-holding grandchild, and an unrelated sentinel process runs concurrently.
     let sb_running = TestSandbox::new();
+    let sentinel_pid_file = sb_running.root.join("unrelated-sentinel.pid");
     let parent_pid_file = sb_running.root.join("parent-running.pid");
+    let bridge_pid_file = sb_running.root.join("bridge-exited.pid");
     let pid_file_running = sb_running.root.join("grandchild-running.pid");
+    let _cleanup_sentinel = PidFileCleanupGuard(sentinel_pid_file.clone());
     let _cleanup_parent = PidFileCleanupGuard(parent_pid_file.clone());
+    let _cleanup_bridge = PidFileCleanupGuard(bridge_pid_file.clone());
     let _cleanup_running = PidFileCleanupGuard(pid_file_running.clone());
+
+    let mut sentinel_child = std::process::Command::new(support::compiled_fake_tool_binary())
+        .arg("--internal-hold-pipes-ms")
+        .arg("15000")
+        .arg(&sentinel_pid_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn unrelated sentinel process");
+    let sentinel_pid = sentinel_child.id();
+
     sb_running.install_fake_tool(
         "agy",
         &[
             ("version_stdout", "Antigravity 1.0.0"),
             ("parent_pid_file", &parent_pid_file.to_string_lossy()),
+            ("bridge_pid_file", &bridge_pid_file.to_string_lossy()),
             ("version_sleep_ms", "8000"),
-            ("spawn_hold_pipes_ms", "8000"),
+            ("spawn_bridge_hold_pipes_ms", "8000"),
             ("hold_pid_file", &pid_file_running.to_string_lossy()),
         ],
     );
@@ -1430,6 +1448,11 @@ fn agents_probe_timeout_terminates_running_parent_and_descendant() {
         .trim()
         .parse()
         .expect("valid parent-running pid");
+    let bridge_pid: u32 = fs::read_to_string(&bridge_pid_file)
+        .expect("bridge-exited pid file must be written")
+        .trim()
+        .parse()
+        .expect("valid bridge-exited pid");
     let grandchild_running_pid: u32 = fs::read_to_string(&pid_file_running)
         .expect("grandchild-running pid file must be written")
         .trim()
@@ -1437,20 +1460,36 @@ fn agents_probe_timeout_terminates_running_parent_and_descendant() {
         .expect("valid grandchild-running pid");
 
     let parent_alive = is_process_alive(parent_pid);
+    let bridge_alive = is_process_alive(bridge_pid);
     let grandchild_alive = is_process_alive(grandchild_running_pid);
+    let sentinel_alive = is_process_alive(sentinel_pid);
+
+    let _ = sentinel_child.kill();
+    let _ = sentinel_child.wait();
     if parent_alive {
         kill_process_best_effort(parent_pid);
+    }
+    if bridge_alive {
+        kill_process_best_effort(bridge_pid);
     }
     if grandchild_alive {
         kill_process_best_effort(grandchild_running_pid);
     }
+    assert!(
+        !bridge_alive,
+        "intermediate bridge PID {bridge_pid} must have exited before timeout cleanup"
+    );
     assert!(
         !parent_alive,
         "still-running parent PID {parent_pid} survived production timeout cleanup"
     );
     assert!(
         !grandchild_alive,
-        "descendant PID {grandchild_running_pid} (still-running parent) survived production timeout cleanup"
+        "descendant PID {grandchild_running_pid} (with exited intermediate parent) survived production timeout cleanup"
+    );
+    assert!(
+        sentinel_alive,
+        "unrelated sentinel PID {sentinel_pid} must remain alive across timeout cleanup"
     );
 }
 

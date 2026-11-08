@@ -56,6 +56,34 @@ fn main() -> ExitCode {
     }
 
     let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from(&arg0));
+    if args.first().map(String::as_str) == Some("--internal-bridge-hold-pipes-ms") {
+        let hold_ms = args.get(1).map(String::as_str).unwrap_or("8000");
+        let bridge_pid_file = args.get(2).map(String::as_str).unwrap_or("");
+        let hold_pid_file = args.get(3).map(String::as_str).unwrap_or("");
+        if !bridge_pid_file.is_empty() {
+            let _ = fs::write(bridge_pid_file, format!("{}", std::process::id()));
+        }
+        let _ = Command::new(&exe_path)
+            .arg("--internal-hold-pipes-ms")
+            .arg(hold_ms)
+            .arg(hold_pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn();
+        if !hold_pid_file.is_empty() {
+            for _ in 0..200 {
+                if fs::read_to_string(hold_pid_file)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        return ExitCode::from(0);
+    }
     let arg0_path = PathBuf::from(&arg0);
 
     let tool_name = arg0_path
@@ -103,6 +131,19 @@ fn main() -> ExitCode {
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn();
+        }
+        if let Some(hold_ms) = cfg.get("spawn_bridge_hold_pipes_ms") {
+            let bridge_pid_file = cfg.get("bridge_pid_file").map(String::as_str).unwrap_or("");
+            let pid_file = cfg.get("hold_pid_file").map(String::as_str).unwrap_or("");
+            let _ = Command::new(&exe_path)
+                .arg("--internal-bridge-hold-pipes-ms")
+                .arg(hold_ms)
+                .arg(bridge_pid_file)
+                .arg(pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status();
         }
         if let Some(ms) = cfg.get("version_sleep_ms").and_then(|v| v.parse::<u64>().ok()) {
             thread::sleep(Duration::from_millis(ms));
@@ -255,10 +296,10 @@ fn update_cfg_version(cfg_path: &Path, next_ver: &str) {
 }
 "#;
 
-fn compiled_fake_tool_binary() -> &'static Path {
+pub fn compiled_fake_tool_binary() -> &'static Path {
     FAKE_TOOL_BIN.get_or_init(|| {
         let pid = std::process::id();
-        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-v2-{pid}"));
+        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-v3-{pid}"));
         fs::create_dir_all(&out_dir).expect("create fake tool build dir");
         let src_path = out_dir.join("fake_tool.rs");
         let bin_name = if cfg!(windows) {

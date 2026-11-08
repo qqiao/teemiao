@@ -256,6 +256,14 @@ pub trait ProcessRunner {
 #[derive(Debug, Default)]
 pub struct RealProcessRunner {
     cancelled: Arc<AtomicBool>,
+    #[cfg(test)]
+    pre_attach_delay: Duration,
+    #[cfg(test)]
+    pre_attach_check_absent_path: Option<PathBuf>,
+    #[cfg(test)]
+    pre_attach_path_was_absent: Arc<AtomicBool>,
+    #[cfg(all(windows, test))]
+    force_job_assign_access_denied: bool,
 }
 
 impl RealProcessRunner {
@@ -263,6 +271,14 @@ impl RealProcessRunner {
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            pre_attach_delay: Duration::ZERO,
+            #[cfg(test)]
+            pre_attach_check_absent_path: None,
+            #[cfg(test)]
+            pre_attach_path_was_absent: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(windows, test))]
+            force_job_assign_access_denied: false,
         }
     }
 }
@@ -301,6 +317,12 @@ impl RealProcessRunner {
             cmd.process_group(0);
         }
 
+        #[cfg(windows)]
+        if request.timeout.is_some() {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(win_process_tree::CREATE_SUSPENDED);
+        }
+
         for (k, v) in &request.env_overrides {
             cmd.env(k, v);
         }
@@ -309,7 +331,24 @@ impl RealProcessRunner {
             program: request.program.clone(),
             source,
         })?;
-        let child_group = ChildProcessGroup::attach(&child, request.timeout.is_some());
+
+        #[cfg(test)]
+        {
+            if !self.pre_attach_delay.is_zero() {
+                thread::sleep(self.pre_attach_delay);
+            }
+            if let Some(ref check_path) = self.pre_attach_check_absent_path {
+                self.pre_attach_path_was_absent
+                    .store(!check_path.exists(), Ordering::SeqCst);
+            }
+        }
+
+        let child_group = self
+            .attach_and_resume_child(&mut child, request.timeout.is_some())
+            .map_err(|source| ProcessError::Io {
+                program: request.program.clone(),
+                source,
+            })?;
 
         let stdout_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
         let stderr_buf = Arc::new(Mutex::new(BoundedStreamBuffer::default()));
@@ -437,36 +476,41 @@ impl RealProcessRunner {
             stderr_truncated,
         })
     }
-}
-
-struct ChildProcessGroup {
-    child_pid: u32,
-    #[cfg(windows)]
-    job_handle: *mut std::ffi::c_void,
-}
-
-impl ChildProcessGroup {
-    fn attach(child: &std::process::Child, has_timeout: bool) -> Self {
+    fn attach_and_resume_child(
+        &self,
+        child: &mut std::process::Child,
+        has_timeout: bool,
+    ) -> io::Result<ChildProcessGroup> {
         let child_pid = child.id();
         #[cfg(windows)]
         {
-            use std::os::windows::io::AsRawHandle;
             let job_handle = if has_timeout {
-                win_process_tree::create_and_assign_job(child.as_raw_handle())
+                #[cfg(test)]
+                let force_denied = self.force_job_assign_access_denied;
+                #[cfg(not(test))]
+                let force_denied = false;
+                win_process_tree::attach_and_resume(child, force_denied)?
             } else {
                 std::ptr::null_mut()
             };
-            Self {
+            Ok(ChildProcessGroup {
                 child_pid,
                 job_handle,
-            }
+            })
         }
         #[cfg(not(windows))]
         {
-            let _ = has_timeout;
-            Self { child_pid }
+            let _ = (self, has_timeout);
+            Ok(ChildProcessGroup { child_pid })
         }
     }
+}
+
+struct ChildProcessGroup {
+    #[cfg_attr(windows, allow(dead_code))]
+    child_pid: u32,
+    #[cfg(windows)]
+    job_handle: *mut std::ffi::c_void,
 }
 
 #[cfg(windows)]
@@ -492,7 +536,7 @@ fn terminate_timed_out_child(child: &mut std::process::Child, group: &ChildProce
     }
     #[cfg(windows)]
     {
-        win_process_tree::terminate_job_and_tree(child, group.job_handle, group.child_pid);
+        win_process_tree::terminate_job_and_tree(child, group.job_handle);
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -501,155 +545,533 @@ fn terminate_timed_out_child(child: &mut std::process::Child, group: &ChildProce
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod win_process_tree {
     use std::collections::BTreeSet;
-    use std::ffi::c_void;
-    use std::ptr;
+    use std::io;
+    use std::time::{Duration, Instant};
 
-    type Handle = *mut c_void;
-    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
-    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
-    const PROCESS_TERMINATE: u32 = 0x0001;
-    const SYNCHRONIZE: u32 = 0x0010_0000;
+    pub(super) const JOB_CLEANUP_WAIT_BUDGET: Duration = Duration::from_millis(500);
 
-    #[repr(C)]
-    struct ProcessEntry32W {
-        dw_size: u32,
-        cnt_usage: u32,
-        th32_process_id: u32,
-        th32_default_heap_id: usize,
-        th32_module_id: u32,
-        cnt_threads: u32,
-        th32_parent_process_id: u32,
-        pc_pri_class_base: i32,
-        dw_flags: u32,
-        sz_exe_file: [u16; 260],
-    }
-
-    unsafe extern "system" {
-        fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> Handle;
-        fn AssignProcessToJobObject(h_job: Handle, h_process: Handle) -> i32;
-        fn TerminateJobObject(h_job: Handle, u_exit_code: u32) -> i32;
-        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> Handle;
-        fn Process32FirstW(h_snapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
-        fn Process32NextW(h_snapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
-        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32)
-        -> Handle;
-        fn TerminateProcess(h_process: Handle, u_exit_code: u32) -> i32;
-        fn WaitForSingleObject(h_handle: Handle, dw_milliseconds: u32) -> u32;
-        fn CloseHandle(h_object: Handle) -> i32;
-    }
-
-    pub(super) fn create_and_assign_job(process_handle: Handle) -> Handle {
-        // SAFETY: Creates an unnamed Win32 Job Object and assigns the valid child process handle to it.
-        unsafe {
-            let job = CreateJobObjectW(ptr::null(), ptr::null());
-            if job.is_null() {
-                return ptr::null_mut();
-            }
-            if AssignProcessToJobObject(job, process_handle) == 0 {
-                let _ = CloseHandle(job);
-                return ptr::null_mut();
-            }
-            job
+    pub(super) trait Win32JobBackend {
+        fn create_job(&self) -> io::Result<usize>;
+        fn set_kill_on_close(&self, job: usize) -> io::Result<()>;
+        fn assign_process_to_job(&self, job: usize, process: usize) -> io::Result<()>;
+        fn snapshot_threads(&self) -> io::Result<Vec<(u32, u32)>>;
+        fn open_thread(&self, tid: u32) -> Option<usize>;
+        fn thread_owner_pid(&self, thread_handle: usize) -> u32;
+        fn is_thread_alive(&self, thread_handle: usize) -> bool;
+        fn resume_thread(&self, thread_handle: usize) -> io::Result<u32>;
+        fn terminate_job(&self, job: usize);
+        fn query_job_process_ids(&self, job: usize) -> Vec<u32>;
+        fn open_sync_process(&self, pid: u32) -> Option<usize>;
+        fn is_process_in_job(&self, process_handle: usize, job: usize) -> bool;
+        fn wait_process(&self, process_handle: usize, timeout_ms: u32);
+        fn close_handle(&self, handle: usize);
+        fn now(&self) -> Instant {
+            Instant::now()
         }
     }
 
-    pub(super) fn close_job(job_handle: Handle) {
-        if !job_handle.is_null() {
-            // SAFETY: Closes a valid Job Object handle created by `CreateJobObjectW`.
-            unsafe {
-                let _ = CloseHandle(job_handle);
-            }
+    pub(super) fn resume_suspended_process_with_backend<B: Win32JobBackend>(
+        backend: &B,
+        child_pid: u32,
+    ) -> io::Result<()> {
+        if child_pid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot resume process with PID 0",
+            ));
         }
-    }
-
-    pub(super) fn terminate_job_and_tree(
-        child: &mut std::process::Child,
-        job_handle: Handle,
-        root_pid: u32,
-    ) {
-        let handles = open_descendant_handles(root_pid);
-        if !job_handle.is_null() {
-            // SAFETY: Terminates all processes associated with the valid Job Object handle.
-            unsafe {
-                let _ = TerminateJobObject(job_handle, 1);
-            }
-        }
-        let _ = child.kill();
-        for &h in &handles {
-            // SAFETY: `h` is a valid process handle opened with `PROCESS_TERMINATE | SYNCHRONIZE`.
-            unsafe {
-                let _ = TerminateProcess(h, 1);
-            }
-        }
-        for h in handles {
-            // SAFETY: Waits briefly for kernel process rundown so inherited pipes close before returning.
-            unsafe {
-                let _ = WaitForSingleObject(h, 500);
-                let _ = CloseHandle(h);
-            }
-        }
-    }
-
-    fn open_descendant_handles(root_pid: u32) -> Vec<Handle> {
-        if root_pid == 0 {
-            return Vec::new();
-        }
-        let self_pid = std::process::id();
-        let mut pairs = Vec::new();
-        // SAFETY: Takes a point-in-time process snapshot and iterates with a properly sized `ProcessEntry32W`.
-        unsafe {
-            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
-                return Vec::new();
-            }
-            let mut entry: ProcessEntry32W = std::mem::zeroed();
-            entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
-            if Process32FirstW(snap, &mut entry) != 0 {
-                loop {
-                    pairs.push((entry.th32_process_id, entry.th32_parent_process_id));
-                    if Process32NextW(snap, &mut entry) == 0 {
-                        break;
-                    }
-                }
-            }
-            let _ = CloseHandle(snap);
-        }
-
-        let mut tree_pids = BTreeSet::from([root_pid]);
-        loop {
-            let mut added = false;
-            for &(pid, ppid) in &pairs {
-                if pid != 0
-                    && pid != self_pid
-                    && tree_pids.contains(&ppid)
-                    && !tree_pids.contains(&pid)
-                {
-                    tree_pids.insert(pid);
-                    added = true;
-                }
-            }
-            if !added {
-                break;
-            }
-        }
-
-        let mut handles = Vec::new();
-        for pid in tree_pids {
-            if pid == self_pid {
+        let entries = backend.snapshot_threads()?;
+        for (tid, owner_pid) in entries {
+            if tid == 0 || owner_pid != child_pid {
                 continue;
             }
-            // SAFETY: Opens a process handle for termination and synchronization if the PID is still active.
-            unsafe {
-                let h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, pid);
-                if !h.is_null() {
+            let Some(th) = backend.open_thread(tid) else {
+                continue;
+            };
+            if backend.thread_owner_pid(th) != child_pid || !backend.is_thread_alive(th) {
+                backend.close_handle(th);
+                continue;
+            }
+            match backend.resume_thread(th) {
+                Ok(prev_count) if prev_count > 0 => {
+                    for _ in 1..prev_count {
+                        if let Err(err) = backend.resume_thread(th) {
+                            backend.close_handle(th);
+                            return Err(err);
+                        }
+                    }
+                    backend.close_handle(th);
+                    return Ok(());
+                }
+                Ok(_) => {
+                    backend.close_handle(th);
+                }
+                Err(err) => {
+                    backend.close_handle(th);
+                    return Err(err);
+                }
+            }
+        }
+        Err(io::Error::other(format!(
+            "failed to locate and resume suspended primary thread for PID {child_pid}"
+        )))
+    }
+
+    pub(super) fn setup_contained_process_with_backend<B: Win32JobBackend>(
+        backend: &B,
+        process_handle: usize,
+        child_pid: u32,
+    ) -> io::Result<usize> {
+        let job = backend.create_job()?;
+        if let Err(err) = backend.set_kill_on_close(job) {
+            backend.close_handle(job);
+            return Err(err);
+        }
+        if let Err(err) = backend.assign_process_to_job(job, process_handle) {
+            backend.close_handle(job);
+            return Err(err);
+        }
+        if let Err(err) = resume_suspended_process_with_backend(backend, child_pid) {
+            backend.terminate_job(job);
+            backend.close_handle(job);
+            return Err(err);
+        }
+        Ok(job)
+    }
+
+    fn collect_verified_job_member_handles<B: Win32JobBackend>(
+        backend: &B,
+        job: usize,
+        self_pid: u32,
+        seen_pids: &mut BTreeSet<u32>,
+    ) -> Vec<usize> {
+        if job == 0 {
+            return Vec::new();
+        }
+        let mut handles = Vec::new();
+        for pid in backend.query_job_process_ids(job) {
+            if pid == 0 || pid == self_pid || !seen_pids.insert(pid) {
+                continue;
+            }
+            if let Some(h) = backend.open_sync_process(pid) {
+                if backend.is_process_in_job(h, job) {
                     handles.push(h);
+                } else {
+                    backend.close_handle(h);
                 }
             }
         }
         handles
+    }
+
+    pub(super) fn terminate_job_and_wait_with_backend<B: Win32JobBackend, K: FnOnce()>(
+        backend: &B,
+        job: usize,
+        self_pid: u32,
+        kill_root_child: K,
+    ) {
+        let mut seen_pids = BTreeSet::new();
+        let mut handles =
+            collect_verified_job_member_handles(backend, job, self_pid, &mut seen_pids);
+        if job != 0 {
+            backend.terminate_job(job);
+        }
+        kill_root_child();
+        handles.extend(collect_verified_job_member_handles(
+            backend,
+            job,
+            self_pid,
+            &mut seen_pids,
+        ));
+
+        let deadline = backend.now() + JOB_CLEANUP_WAIT_BUDGET;
+        for h in handles {
+            let remaining_ms = deadline
+                .saturating_duration_since(backend.now())
+                .as_millis()
+                .min(u32::MAX as u128) as u32;
+            backend.wait_process(h, remaining_ms);
+            backend.close_handle(h);
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) use os::{CREATE_SUSPENDED, attach_and_resume, close_job, terminate_job_and_tree};
+
+    #[cfg(windows)]
+    mod os {
+        use super::{
+            Win32JobBackend, setup_contained_process_with_backend,
+            terminate_job_and_wait_with_backend,
+        };
+        use std::ffi::c_void;
+        use std::io;
+        use std::ptr;
+
+        pub(in crate::agents) type Handle = *mut c_void;
+        pub(in crate::agents) const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+        const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+        const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+        const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+        const ERROR_MORE_DATA: i32 = 234;
+        const JOB_OBJECT_BASIC_PROCESS_ID_LIST: i32 = 3;
+        const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+        const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+        const MAX_TRACKED_JOB_PIDS: usize = 256;
+
+        #[repr(C)]
+        struct ThreadEntry32 {
+            dw_size: u32,
+            cnt_usage: u32,
+            th32_thread_id: u32,
+            th32_owner_process_id: u32,
+            tp_base_pri: i32,
+            tp_delta_pri: i32,
+            dw_flags: u32,
+        }
+
+        #[repr(C)]
+        struct JobObjectBasicLimitInformation {
+            per_process_user_time_limit: i64,
+            per_job_user_time_limit: i64,
+            limit_flags: u32,
+            minimum_working_set_size: usize,
+            maximum_working_set_size: usize,
+            active_process_limit: u32,
+            affinity: usize,
+            priority_class: u32,
+            scheduling_class: u32,
+        }
+
+        #[repr(C)]
+        struct IoCounters {
+            read_operation_count: u64,
+            write_operation_count: u64,
+            other_operation_count: u64,
+            read_transfer_count: u64,
+            write_transfer_count: u64,
+            other_transfer_count: u64,
+        }
+
+        #[repr(C)]
+        struct JobObjectExtendedLimitInformation {
+            basic_limit_information: JobObjectBasicLimitInformation,
+            io_info: IoCounters,
+            process_memory_limit: usize,
+            job_memory_limit: usize,
+            peak_process_memory_used: usize,
+            peak_job_memory_used: usize,
+        }
+
+        #[repr(C)]
+        struct JobObjectBasicProcessIdList {
+            number_of_assigned_processes: u32,
+            number_of_process_ids_in_list: u32,
+            process_id_list: [usize; MAX_TRACKED_JOB_PIDS],
+        }
+
+        unsafe extern "system" {
+            fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> Handle;
+            fn SetInformationJobObject(
+                h_job: Handle,
+                job_object_information_class: i32,
+                lp_job_object_information: *const c_void,
+                cb_job_object_information_length: u32,
+            ) -> i32;
+            fn AssignProcessToJobObject(h_job: Handle, h_process: Handle) -> i32;
+            fn TerminateJobObject(h_job: Handle, u_exit_code: u32) -> i32;
+            fn QueryInformationJobObject(
+                h_job: Handle,
+                job_object_information_class: i32,
+                lp_job_object_information: *mut c_void,
+                cb_job_object_information_length: u32,
+                lp_return_length: *mut u32,
+            ) -> i32;
+            fn IsProcessInJob(process_handle: Handle, job_handle: Handle, result: *mut i32) -> i32;
+            fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> Handle;
+            fn Thread32First(h_snapshot: Handle, lpte: *mut ThreadEntry32) -> i32;
+            fn Thread32Next(h_snapshot: Handle, lpte: *mut ThreadEntry32) -> i32;
+            fn OpenThread(
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_thread_id: u32,
+            ) -> Handle;
+            fn GetProcessIdOfThread(thread: Handle) -> u32;
+            fn ResumeThread(h_thread: Handle) -> u32;
+            fn OpenProcess(
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_process_id: u32,
+            ) -> Handle;
+            fn WaitForSingleObject(h_handle: Handle, dw_milliseconds: u32) -> u32;
+            fn CloseHandle(h_object: Handle) -> i32;
+            #[cfg(test)]
+            fn GetCurrentProcess() -> Handle;
+            #[cfg(test)]
+            fn DuplicateHandle(
+                h_source_process_handle: Handle,
+                h_source_handle: Handle,
+                h_target_process_handle: Handle,
+                lp_target_handle: *mut Handle,
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_options: u32,
+            ) -> i32;
+        }
+
+        struct OsWin32JobBackend {
+            force_assign_access_denied: bool,
+        }
+
+        impl Win32JobBackend for OsWin32JobBackend {
+            fn create_job(&self) -> io::Result<usize> {
+                // SAFETY: Creates an unnamed Win32 Job Object with default security attributes.
+                unsafe {
+                    let job = CreateJobObjectW(ptr::null(), ptr::null());
+                    if job.is_null() {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(job as usize)
+                    }
+                }
+            }
+
+            fn set_kill_on_close(&self, job: usize) -> io::Result<()> {
+                // SAFETY: Configures `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on a valid Job Object handle.
+                unsafe {
+                    let mut info: JobObjectExtendedLimitInformation = std::mem::zeroed();
+                    info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    let ok = SetInformationJobObject(
+                        job as Handle,
+                        JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                        (&raw const info).cast::<c_void>(),
+                        std::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+                    );
+                    if ok == 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+
+            fn assign_process_to_job(&self, job: usize, process: usize) -> io::Result<()> {
+                #[cfg(test)]
+                if self.force_assign_access_denied {
+                    // SAFETY: Duplicates the valid job handle with zero access rights (`dw_desired_access = 0`)
+                    // so the kernel `AssignProcessToJobObject` call deterministically fails with `ERROR_ACCESS_DENIED`.
+                    unsafe {
+                        let current = GetCurrentProcess();
+                        let mut restricted_job: Handle = ptr::null_mut();
+                        if DuplicateHandle(
+                            current,
+                            job as Handle,
+                            current,
+                            &mut restricted_job,
+                            0,
+                            0,
+                            0,
+                        ) == 0
+                        {
+                            return Err(io::Error::last_os_error());
+                        }
+                        let rc = AssignProcessToJobObject(restricted_job, process as Handle);
+                        let err = io::Error::last_os_error();
+                        let _ = CloseHandle(restricted_job);
+                        if rc == 0 {
+                            return Err(err);
+                        }
+                    }
+                }
+                #[cfg(not(test))]
+                let _ = self.force_assign_access_denied;
+
+                // SAFETY: Assigns the valid suspended child process handle to the valid Job Object handle.
+                unsafe {
+                    if AssignProcessToJobObject(job as Handle, process as Handle) == 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+
+            fn snapshot_threads(&self) -> io::Result<Vec<(u32, u32)>> {
+                // SAFETY: Takes a thread snapshot and iterates with a properly initialized `ThreadEntry32`.
+                unsafe {
+                    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                    if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let mut pairs = Vec::new();
+                    let mut entry: ThreadEntry32 = std::mem::zeroed();
+                    entry.dw_size = std::mem::size_of::<ThreadEntry32>() as u32;
+                    if Thread32First(snap, &mut entry) != 0 {
+                        loop {
+                            pairs.push((entry.th32_thread_id, entry.th32_owner_process_id));
+                            entry.dw_size = std::mem::size_of::<ThreadEntry32>() as u32;
+                            if Thread32Next(snap, &mut entry) == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = CloseHandle(snap);
+                    Ok(pairs)
+                }
+            }
+
+            fn open_thread(&self, tid: u32) -> Option<usize> {
+                // SAFETY: Opens a thread handle for suspend/resume, ownership verification, and liveness check.
+                unsafe {
+                    let h = OpenThread(
+                        THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                        0,
+                        tid,
+                    );
+                    if h.is_null() { None } else { Some(h as usize) }
+                }
+            }
+
+            fn thread_owner_pid(&self, thread_handle: usize) -> u32 {
+                // SAFETY: Queries the owning PID of a valid open thread handle.
+                unsafe { GetProcessIdOfThread(thread_handle as Handle) }
+            }
+
+            fn is_thread_alive(&self, thread_handle: usize) -> bool {
+                // SAFETY: Non-blocking wait checks whether the thread handle is still non-signaled.
+                unsafe { WaitForSingleObject(thread_handle as Handle, 0) == WAIT_TIMEOUT }
+            }
+
+            fn resume_thread(&self, thread_handle: usize) -> io::Result<u32> {
+                // SAFETY: Decrements the suspend count of a valid open thread handle.
+                unsafe {
+                    let prev = ResumeThread(thread_handle as Handle);
+                    if prev == u32::MAX {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(prev)
+                    }
+                }
+            }
+
+            fn terminate_job(&self, job: usize) {
+                if job != 0 {
+                    // SAFETY: Terminates all processes associated with the valid Job Object handle.
+                    unsafe {
+                        let _ = TerminateJobObject(job as Handle, 1);
+                    }
+                }
+            }
+
+            fn query_job_process_ids(&self, job: usize) -> Vec<u32> {
+                if job == 0 {
+                    return Vec::new();
+                }
+                // SAFETY: Queries `JobObjectBasicProcessIdList` on a valid Job Object handle using a repr(C) buffer.
+                unsafe {
+                    let mut list: JobObjectBasicProcessIdList = std::mem::zeroed();
+                    let ok = QueryInformationJobObject(
+                        job as Handle,
+                        JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+                        (&raw mut list).cast::<c_void>(),
+                        std::mem::size_of::<JobObjectBasicProcessIdList>() as u32,
+                        ptr::null_mut(),
+                    );
+                    if ok == 0 && io::Error::last_os_error().raw_os_error() != Some(ERROR_MORE_DATA)
+                    {
+                        return Vec::new();
+                    }
+                    let count =
+                        (list.number_of_process_ids_in_list as usize).min(MAX_TRACKED_JOB_PIDS);
+                    list.process_id_list[..count]
+                        .iter()
+                        .filter_map(|&raw| u32::try_from(raw).ok())
+                        .collect()
+                }
+            }
+
+            fn open_sync_process(&self, pid: u32) -> Option<usize> {
+                // SAFETY: Opens a process handle strictly for synchronization and job-membership query (never termination).
+                unsafe {
+                    let h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                    if h.is_null() { None } else { Some(h as usize) }
+                }
+            }
+
+            fn is_process_in_job(&self, process_handle: usize, job: usize) -> bool {
+                // SAFETY: Verifies that `process_handle` is a member of `job` before waiting on it.
+                unsafe {
+                    let mut in_job: i32 = 0;
+                    IsProcessInJob(process_handle as Handle, job as Handle, &mut in_job) != 0
+                        && in_job != 0
+                }
+            }
+
+            fn wait_process(&self, process_handle: usize, timeout_ms: u32) {
+                // SAFETY: Waits for process rundown within the shared bounded timeout budget.
+                unsafe {
+                    let _ = WaitForSingleObject(process_handle as Handle, timeout_ms);
+                }
+            }
+
+            fn close_handle(&self, handle: usize) {
+                if handle != 0 {
+                    // SAFETY: Closes a valid Win32 kernel handle.
+                    unsafe {
+                        let _ = CloseHandle(handle as Handle);
+                    }
+                }
+            }
+        }
+
+        pub(in crate::agents) fn attach_and_resume(
+            child: &mut std::process::Child,
+            force_assign_access_denied: bool,
+        ) -> io::Result<Handle> {
+            use std::os::windows::io::AsRawHandle;
+            let backend = OsWin32JobBackend {
+                force_assign_access_denied,
+            };
+            let process_handle = child.as_raw_handle() as usize;
+            let child_pid = child.id();
+            match setup_contained_process_with_backend(&backend, process_handle, child_pid) {
+                Ok(job) => Ok(job as Handle),
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(err)
+                }
+            }
+        }
+
+        pub(in crate::agents) fn close_job(job_handle: Handle) {
+            if !job_handle.is_null() {
+                // SAFETY: Closes a valid Job Object handle created by `CreateJobObjectW`.
+                unsafe {
+                    let _ = CloseHandle(job_handle);
+                }
+            }
+        }
+
+        pub(in crate::agents) fn terminate_job_and_tree(
+            child: &mut std::process::Child,
+            job_handle: Handle,
+        ) {
+            let backend = OsWin32JobBackend {
+                force_assign_access_denied: false,
+            };
+            let self_pid = std::process::id();
+            terminate_job_and_wait_with_backend(&backend, job_handle as usize, self_pid, || {
+                let _ = child.kill();
+            });
+        }
     }
 }
 
@@ -2458,5 +2880,625 @@ mod tests {
             codex_rel_cmd.owner,
             UpdateOwner::ManualActionRequired { .. }
         ));
+    }
+
+    struct MockWin32JobBackend {
+        events: Mutex<Vec<String>>,
+        create_job_res: io::Result<usize>,
+        set_kill_res: io::Result<()>,
+        assign_res: io::Result<()>,
+        threads: io::Result<Vec<(u32, u32)>>,
+        thread_details: std::collections::HashMap<u32, (usize, u32, bool, io::Result<u32>)>,
+        job_pids_before_kill: Vec<u32>,
+        job_pids_after_kill: Vec<u32>,
+        in_job_pids: std::collections::BTreeSet<u32>,
+        terminated: AtomicBool,
+        now_base: Instant,
+        elapsed_ms: AtomicUsize,
+        wait_step_ms: usize,
+        waited_handles: Mutex<Vec<(usize, u32)>>,
+        closed_handles: Mutex<Vec<usize>>,
+    }
+
+    impl MockWin32JobBackend {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                create_job_res: Ok(777),
+                set_kill_res: Ok(()),
+                assign_res: Ok(()),
+                threads: Ok(vec![(501, 100)]),
+                thread_details: std::collections::HashMap::from([(501, (901, 100, true, Ok(1)))]),
+                job_pids_before_kill: Vec::new(),
+                job_pids_after_kill: Vec::new(),
+                in_job_pids: std::collections::BTreeSet::new(),
+                terminated: AtomicBool::new(false),
+                now_base: Instant::now(),
+                elapsed_ms: AtomicUsize::new(0),
+                wait_step_ms: 0,
+                waited_handles: Mutex::new(Vec::new()),
+                closed_handles: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn clone_io_res<T: Copy>(res: &io::Result<T>) -> io::Result<T> {
+            match res {
+                Ok(v) => Ok(*v),
+                Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+            }
+        }
+    }
+
+    impl win_process_tree::Win32JobBackend for MockWin32JobBackend {
+        fn create_job(&self) -> io::Result<usize> {
+            self.events.lock().unwrap().push("create_job".to_string());
+            Self::clone_io_res(&self.create_job_res)
+        }
+
+        fn set_kill_on_close(&self, job: usize) -> io::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("set_kill_on_close:{job}"));
+            Self::clone_io_res(&self.set_kill_res)
+        }
+
+        fn assign_process_to_job(&self, job: usize, process: usize) -> io::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("assign_process:{job}:{process}"));
+            Self::clone_io_res(&self.assign_res)
+        }
+
+        fn snapshot_threads(&self) -> io::Result<Vec<(u32, u32)>> {
+            self.events
+                .lock()
+                .unwrap()
+                .push("snapshot_threads".to_string());
+            match &self.threads {
+                Ok(v) => Ok(v.clone()),
+                Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+            }
+        }
+
+        fn open_thread(&self, tid: u32) -> Option<usize> {
+            self.thread_details.get(&tid).map(|d| d.0)
+        }
+
+        fn thread_owner_pid(&self, thread_handle: usize) -> u32 {
+            self.thread_details
+                .values()
+                .find(|d| d.0 == thread_handle)
+                .map(|d| d.1)
+                .unwrap_or(0)
+        }
+
+        fn is_thread_alive(&self, thread_handle: usize) -> bool {
+            self.thread_details
+                .values()
+                .find(|d| d.0 == thread_handle)
+                .map(|d| d.2)
+                .unwrap_or(false)
+        }
+
+        fn resume_thread(&self, thread_handle: usize) -> io::Result<u32> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("resume_thread:{thread_handle}"));
+            let Some(detail) = self.thread_details.values().find(|d| d.0 == thread_handle) else {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "unknown thread"));
+            };
+            Self::clone_io_res(&detail.3)
+        }
+
+        fn terminate_job(&self, job: usize) {
+            self.terminated.store(true, Ordering::SeqCst);
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("terminate_job:{job}"));
+        }
+
+        fn query_job_process_ids(&self, _job: usize) -> Vec<u32> {
+            if self.terminated.load(Ordering::SeqCst) {
+                self.job_pids_after_kill.clone()
+            } else {
+                self.job_pids_before_kill.clone()
+            }
+        }
+
+        fn open_sync_process(&self, pid: u32) -> Option<usize> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("open_sync_process:{pid}"));
+            Some(pid as usize)
+        }
+
+        fn is_process_in_job(&self, process_handle: usize, _job: usize) -> bool {
+            self.in_job_pids.contains(&(process_handle as u32))
+        }
+
+        fn wait_process(&self, process_handle: usize, timeout_ms: u32) {
+            self.waited_handles
+                .lock()
+                .unwrap()
+                .push((process_handle, timeout_ms));
+            self.elapsed_ms
+                .fetch_add(self.wait_step_ms, Ordering::SeqCst);
+        }
+
+        fn close_handle(&self, handle: usize) {
+            self.closed_handles.lock().unwrap().push(handle);
+        }
+
+        fn now(&self) -> Instant {
+            self.now_base + Duration::from_millis(self.elapsed_ms.load(Ordering::SeqCst) as u64)
+        }
+    }
+
+    #[test]
+    fn windows_job_containment_and_cleanup_state_machine() {
+        // 1. Containment setup assigns process to Job Object strictly BEFORE resuming thread,
+        // skipping stale/terminated/unowned threads in the snapshot.
+        let mut backend_ok = MockWin32JobBackend::new();
+        backend_ok.threads = Ok(vec![
+            (400, 999), // different owner PID in snapshot
+            (401, 100), // owner PID changed / mismatched GetProcessIdOfThread
+            (402, 100), // already terminated thread
+            (403, 100), // non-suspended thread (prev suspend count 0)
+            (501, 100), // valid suspended primary thread (prev suspend count 1)
+        ]);
+        backend_ok.thread_details = std::collections::HashMap::from([
+            (401, (801, 222, true, Ok(1))),
+            (402, (802, 100, false, Ok(1))),
+            (403, (803, 100, true, Ok(0))),
+            (501, (901, 100, true, Ok(1))),
+        ]);
+
+        let job = win_process_tree::setup_contained_process_with_backend(&backend_ok, 42, 100)
+            .expect("setup must succeed");
+        assert_eq!(job, 777);
+        assert_eq!(
+            *backend_ok.events.lock().unwrap(),
+            vec![
+                "create_job",
+                "set_kill_on_close:777",
+                "assign_process:777:42",
+                "snapshot_threads",
+                "resume_thread:803",
+                "resume_thread:901",
+            ],
+            "job assignment must precede thread resumption"
+        );
+        assert_eq!(
+            *backend_ok.closed_handles.lock().unwrap(),
+            vec![801, 802, 803, 901],
+            "all inspected thread handles must be closed"
+        );
+
+        // 2. Setup failures abort before child execution and clean up handles.
+        let mut fail_create = MockWin32JobBackend::new();
+        fail_create.create_job_res = Err(io::Error::from_raw_os_error(5));
+        assert!(
+            win_process_tree::setup_contained_process_with_backend(&fail_create, 42, 100).is_err()
+        );
+        assert_eq!(*fail_create.events.lock().unwrap(), vec!["create_job"]);
+
+        let mut fail_limit = MockWin32JobBackend::new();
+        fail_limit.set_kill_res = Err(io::Error::from_raw_os_error(5));
+        assert!(
+            win_process_tree::setup_contained_process_with_backend(&fail_limit, 42, 100).is_err()
+        );
+        assert_eq!(*fail_limit.closed_handles.lock().unwrap(), vec![777]);
+
+        let mut fail_assign = MockWin32JobBackend::new();
+        fail_assign.assign_res = Err(io::Error::from_raw_os_error(5));
+        assert!(
+            win_process_tree::setup_contained_process_with_backend(&fail_assign, 42, 100).is_err()
+        );
+        assert_eq!(
+            *fail_assign.events.lock().unwrap(),
+            vec![
+                "create_job",
+                "set_kill_on_close:777",
+                "assign_process:777:42"
+            ],
+            "thread must never be resumed when job assignment fails"
+        );
+        assert_eq!(*fail_assign.closed_handles.lock().unwrap(), vec![777]);
+
+        let mut fail_resume = MockWin32JobBackend::new();
+        fail_resume.threads = Ok(vec![]);
+        assert!(
+            win_process_tree::setup_contained_process_with_backend(&fail_resume, 42, 100).is_err()
+        );
+        assert!(
+            fail_resume.terminated.load(Ordering::SeqCst),
+            "job must be terminated if resuming the primary thread fails"
+        );
+        assert_eq!(*fail_resume.closed_handles.lock().unwrap(), vec![777]);
+
+        // 3. Timeout cleanup uses verified job membership, includes early grandchild 300 whose
+        // intermediate parent 200 exited, rejects unrelated PID 200 via IsProcessInJob, and shares
+        // a single 500ms cleanup deadline across all handles.
+        let mut cleanup_backend = MockWin32JobBackend::new();
+        cleanup_backend.job_pids_before_kill = vec![100, 200, 300];
+        cleanup_backend.job_pids_after_kill = vec![100, 300, 400];
+        cleanup_backend.in_job_pids = std::collections::BTreeSet::from([100, 300, 400]);
+        cleanup_backend.wait_step_ms = 200;
+
+        let mut root_killed = false;
+        win_process_tree::terminate_job_and_wait_with_backend(&cleanup_backend, 777, 9999, || {
+            root_killed = true;
+        });
+        assert!(root_killed);
+        assert!(cleanup_backend.terminated.load(Ordering::SeqCst));
+        let waited = cleanup_backend.waited_handles.lock().unwrap().clone();
+        assert_eq!(
+            waited,
+            vec![(100, 500), (300, 300), (400, 100)],
+            "only verified job members [100, 300, 400] may be waited on, using a single shared 500ms budget (unrelated PID 200 excluded)"
+        );
+        assert_eq!(
+            *cleanup_backend.closed_handles.lock().unwrap(),
+            vec![200, 100, 300, 400],
+            "unverified handle 200 must be closed immediately and verified handles closed after waiting"
+        );
+    }
+
+    const HELPER_PROBE_TREE_RS: &str = r#"
+use std::env;
+use std::fs;
+use std::io::Write;
+use std::process::{Command, ExitCode, Stdio};
+use std::thread;
+use std::time::Duration;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    let mode = args.get(1).map(String::as_str).unwrap_or("");
+    match mode {
+        "--sentinel" => {
+            if let Some(p) = args.get(2) {
+                let _ = fs::write(p, format!("{}", std::process::id()));
+            }
+            thread::sleep(Duration::from_secs(20));
+            ExitCode::from(0)
+        }
+        "--holder" => {
+            if let Some(p) = args.get(2) {
+                let _ = fs::write(p, format!("{}", std::process::id()));
+            }
+            println!("holder-piped-stdout");
+            let _ = std::io::stdout().flush();
+            eprintln!("holder-piped-stderr");
+            let _ = std::io::stderr().flush();
+            thread::sleep(Duration::from_secs(20));
+            ExitCode::from(0)
+        }
+        "--bridge" => {
+            let exe = env::current_exe().expect("current_exe");
+            let bridge_pid_file = args.get(2).map(String::as_str).unwrap_or("");
+            let holder_pid_file = args.get(3).map(String::as_str).unwrap_or("");
+            if !bridge_pid_file.is_empty() {
+                let _ = fs::write(bridge_pid_file, format!("{}", std::process::id()));
+            }
+            let _ = Command::new(&exe)
+                .arg("--holder")
+                .arg(holder_pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn holder");
+            for _ in 0..200 {
+                if fs::read_to_string(holder_pid_file)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            ExitCode::from(0)
+        }
+        "--probe" => {
+            let exe = env::current_exe().expect("current_exe");
+            let parent_pid_file = args.get(2).map(String::as_str).unwrap_or("");
+            let bridge_pid_file = args.get(3).map(String::as_str).unwrap_or("");
+            let holder_pid_file = args.get(4).map(String::as_str).unwrap_or("");
+            if !parent_pid_file.is_empty() {
+                let _ = fs::write(parent_pid_file, format!("{}", std::process::id()));
+            }
+            println!("probe-piped-stdout");
+            let _ = std::io::stdout().flush();
+            eprintln!("probe-piped-stderr");
+            let _ = std::io::stderr().flush();
+            let _ = Command::new(&exe)
+                .arg("--bridge")
+                .arg(bridge_pid_file)
+                .arg(holder_pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status();
+            thread::sleep(Duration::from_secs(20));
+            ExitCode::from(0)
+        }
+        _ => {
+            if let Ok(marker) = env::var("TEEMIAO_UNIT_PROBE_MARKER_FILE") {
+                let _ = fs::write(marker, format!("{}", std::process::id()));
+            }
+            println!("Antigravity CLI 1.0.0");
+            ExitCode::from(0)
+        }
+    }
+}
+"#;
+
+    fn compiled_unit_probe_tree_binary() -> &'static std::path::Path {
+        static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        BIN.get_or_init(|| {
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("teemiao-unit-probe-tree-{pid}"));
+            fs::create_dir_all(&dir).expect("create unit probe helper dir");
+            let src = dir.join("probe_tree.rs");
+            let bin = dir.join(if cfg!(windows) {
+                "probe_tree.exe"
+            } else {
+                "probe_tree"
+            });
+            fs::write(&src, HELPER_PROBE_TREE_RS).expect("write probe_tree.rs");
+            let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+            let status = Command::new(rustc)
+                .arg(&src)
+                .arg("-O")
+                .arg("-o")
+                .arg(&bin)
+                .status()
+                .expect("compile probe_tree.rs");
+            assert!(status.success(), "rustc failed on probe_tree.rs");
+            bin
+        })
+    }
+
+    fn is_unit_test_process_alive(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            for _ in 0..10 {
+                let status = Command::new("/bin/kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                if !status.is_ok_and(|s| s.success()) {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            true
+        }
+        #[cfg(windows)]
+        {
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+            const WAIT_TIMEOUT: u32 = 0x0000_0102;
+            unsafe extern "system" {
+                fn OpenProcess(
+                    dw_desired_access: u32,
+                    b_inherit_handle: i32,
+                    dw_process_id: u32,
+                ) -> *mut std::ffi::c_void;
+                fn WaitForSingleObject(
+                    h_handle: *mut std::ffi::c_void,
+                    dw_milliseconds: u32,
+                ) -> u32;
+                fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
+            }
+            // SAFETY: Queries whether `pid` is still active using a non-blocking wait on a `SYNCHRONIZE` handle.
+            unsafe {
+                let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+                if handle.is_null() {
+                    return false;
+                }
+                let rc = WaitForSingleObject(handle, 0);
+                let _ = CloseHandle(handle);
+                rc == WAIT_TIMEOUT
+            }
+        }
+    }
+
+    fn kill_unit_test_process_best_effort(pid: u32) {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[test]
+    fn real_process_runner_containment_early_descendant_and_setup_failure() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let helper = compiled_unit_probe_tree_binary();
+
+        let sentinel_pid_file = tmp.path().join("sentinel.pid");
+        let parent_pid_file = tmp.path().join("parent.pid");
+        let bridge_pid_file = tmp.path().join("bridge.pid");
+        let holder_pid_file = tmp.path().join("holder.pid");
+
+        let mut sentinel = Command::new(helper)
+            .arg("--sentinel")
+            .arg(&sentinel_pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn unrelated sentinel");
+        let sentinel_pid = sentinel.id();
+
+        let mut runner = RealProcessRunner::new();
+        runner.pre_attach_delay = Duration::from_millis(300);
+        runner.pre_attach_check_absent_path = Some(parent_pid_file.clone());
+
+        let req = ProcessRequest {
+            program: helper.to_path_buf(),
+            args: vec![
+                OsString::from("--probe"),
+                parent_pid_file.as_os_str().to_os_string(),
+                bridge_pid_file.as_os_str().to_os_string(),
+                holder_pid_file.as_os_str().to_os_string(),
+            ],
+            env_overrides: Vec::new(),
+            timeout: Some(Duration::from_millis(900)),
+            max_output_bytes: 65536,
+        };
+
+        let out = runner
+            .run_probe(&req)
+            .expect("run_probe must return output");
+        assert!(out.timed_out, "probe must time out");
+
+        #[cfg(windows)]
+        assert!(
+            runner.pre_attach_path_was_absent.load(Ordering::SeqCst),
+            "on Windows, CREATE_SUSPENDED must prevent child execution during the 300ms pre-attach scheduling gap"
+        );
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("probe-piped-stdout") && stdout.contains("holder-piped-stdout"),
+            "piped stdout from both parent and early grandchild must be retained: {stdout}"
+        );
+        assert!(
+            stderr.contains("probe-piped-stderr") && stderr.contains("holder-piped-stderr"),
+            "piped stderr from both parent and early grandchild must be retained: {stderr}"
+        );
+
+        let parent_pid: u32 = fs::read_to_string(&parent_pid_file)
+            .expect("parent pid file")
+            .trim()
+            .parse()
+            .unwrap();
+        let bridge_pid: u32 = fs::read_to_string(&bridge_pid_file)
+            .expect("bridge pid file")
+            .trim()
+            .parse()
+            .unwrap();
+        let holder_pid: u32 = fs::read_to_string(&holder_pid_file)
+            .expect("holder pid file")
+            .trim()
+            .parse()
+            .unwrap();
+
+        let parent_alive = is_unit_test_process_alive(parent_pid);
+        let bridge_alive = is_unit_test_process_alive(bridge_pid);
+        let holder_alive = is_unit_test_process_alive(holder_pid);
+        let sentinel_alive = is_unit_test_process_alive(sentinel_pid);
+
+        let _ = sentinel.kill();
+        let _ = sentinel.wait();
+        if parent_alive {
+            kill_unit_test_process_best_effort(parent_pid);
+        }
+        if bridge_alive {
+            kill_unit_test_process_best_effort(bridge_pid);
+        }
+        if holder_alive {
+            kill_unit_test_process_best_effort(holder_pid);
+        }
+
+        assert!(
+            !bridge_alive,
+            "intermediate bridge process {bridge_pid} must have exited before timeout"
+        );
+        assert!(
+            !parent_alive,
+            "parent probe process {parent_pid} survived production timeout cleanup"
+        );
+        assert!(
+            !holder_alive,
+            "early grandchild pipe-holder {holder_pid} (with exited intermediate parent) survived production timeout cleanup"
+        );
+        assert!(
+            sentinel_alive,
+            "unrelated sentinel process {sentinel_pid} must remain alive across timeout cleanup"
+        );
+
+        #[cfg(windows)]
+        {
+            let setup_fail_marker = tmp.path().join("setup-fail-never-ran.pid");
+            let mut fail_runner = RealProcessRunner::new();
+            fail_runner.force_job_assign_access_denied = true;
+
+            let fail_req = ProcessRequest {
+                program: helper.to_path_buf(),
+                args: vec![
+                    OsString::from("--probe"),
+                    setup_fail_marker.as_os_str().to_os_string(),
+                    bridge_pid_file.as_os_str().to_os_string(),
+                    holder_pid_file.as_os_str().to_os_string(),
+                ],
+                env_overrides: Vec::new(),
+                timeout: Some(Duration::from_secs(5)),
+                max_output_bytes: 65536,
+            };
+            let err = fail_runner
+                .run_probe(&fail_req)
+                .expect_err("job setup failure must return ProcessError::Io");
+            assert!(
+                !setup_fail_marker.exists(),
+                "suspended child must be killed and reaped before executing any instructions when job setup fails: {err}"
+            );
+
+            let bin_dir = tmp.path().join("win-setup-fail-bin");
+            fs::create_dir_all(&bin_dir).unwrap();
+            let agy_exe = bin_dir.join("agy.exe");
+            fs::copy(helper, &agy_exe).unwrap();
+            let env = DiscoveryEnv {
+                path: OsString::from(bin_dir.as_os_str()),
+                pathext: Some(OsString::from(".EXE")),
+                home_dir: Some(tmp.path().join("home")),
+                local_app_data: Some(tmp.path().join("local")),
+                codex_home: None,
+                codex_install_dir: None,
+                homebrew_prefix: None,
+                is_windows: true,
+            };
+            let cmd = AgentsCommand {
+                command: AgentsSubcommand::List,
+            };
+            let mut list_stdout = Vec::new();
+            let mut list_stderr = Vec::new();
+            let code = cmd.run_with_io(&env, &fail_runner, &mut list_stdout, &mut list_stderr);
+            assert_eq!(code, 0);
+            let list_out = String::from_utf8(list_stdout).unwrap();
+            let list_err = String::from_utf8(list_stderr).unwrap();
+            assert!(
+                list_out.contains("Antigravity (antigravity) | version: unknown"),
+                "list output must degrade to version unknown on job setup error: {list_out}"
+            );
+            assert!(
+                list_err.contains("probe failed"),
+                "stderr must report probe failure when job setup fails: {list_err}"
+            );
+        }
     }
 }
