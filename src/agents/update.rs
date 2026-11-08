@@ -195,10 +195,7 @@ pub fn select_update_plan(agent: &DiscoveredAgent) -> UpdatePlan {
             UpdatePlan::Command {
                 program: brew_program.clone(),
                 args,
-                env_overrides: vec![(
-                    OsString::from("HOMEBREW_NO_AUTO_UPDATE"),
-                    OsString::from("1"),
-                )],
+                env_overrides: Vec::new(),
                 display_command,
                 target_description: format!(
                     "{} (Homebrew cask {})",
@@ -216,10 +213,7 @@ pub fn select_update_plan(agent: &DiscoveredAgent) -> UpdatePlan {
             UpdatePlan::Command {
                 program: brew_program.clone(),
                 args,
-                env_overrides: vec![(
-                    OsString::from("HOMEBREW_NO_AUTO_UPDATE"),
-                    OsString::from("1"),
-                )],
+                env_overrides: Vec::new(),
                 display_command,
                 target_description: format!(
                     "{} (Homebrew formula {})",
@@ -692,6 +686,8 @@ impl Drop for TempInstallerDir {
     }
 }
 
+const WINGET_UPDATE_NOT_APPLICABLE_EXIT_CODE: i32 = 0x8A15_002B_u32 as i32;
+
 /// Evaluates updater output and re-probes the active installation on `PATH` to
 /// classify the final update outcome according to FR-008 and FR-009.
 fn evaluate_post_update(
@@ -722,7 +718,16 @@ fn evaluate_post_update(
         };
     }
 
-    if !output.success {
+    let is_winget_no_applicable_upgrade = matches!(before_agent.owner, UpdateOwner::WinGet { .. })
+        && output.status_code == Some(WINGET_UPDATE_NOT_APPLICABLE_EXIT_CODE)
+        && updater_output_confirms_up_to_date(
+            &combined_output,
+            before_agent.version.as_deref().unwrap_or(""),
+            before_agent.id,
+            &before_agent.owner,
+        );
+
+    if !output.success && !is_winget_no_applicable_upgrade {
         let status_label = output
             .status_code
             .map(|c| format!("updater exited with code {c}"))
@@ -743,6 +748,14 @@ fn evaluate_post_update(
         };
     };
 
+    if !rediscovered_matches_selected_installation(before_agent, &after_agent, env.is_windows) {
+        return UpdateOutcome::Failed {
+            reason: "selected installation executable was no longer found on PATH after updater completed".to_string(),
+            path: before_agent.launcher_path.clone(),
+            diagnostics,
+        };
+    }
+
     let Some(after_version) = after_agent.version else {
         return UpdateOutcome::Unverified {
             reason: "post-update version probe failed or returned an unreadable version"
@@ -753,13 +766,15 @@ fn evaluate_post_update(
     };
 
     match &before_agent.version {
-        Some(before_version) if before_version != &after_version => UpdateOutcome::Updated {
-            before: before_version.clone(),
-            after: after_version,
-            path: after_agent.launcher_path,
-            diagnostics,
-        },
-        Some(_same_version) => {
+        Some(before_version) if output.success && before_version != &after_version => {
+            UpdateOutcome::Updated {
+                before: before_version.clone(),
+                after: after_version,
+                path: after_agent.launcher_path,
+                diagnostics,
+            }
+        }
+        Some(before_version) if before_version == &after_version => {
             if updater_output_confirms_up_to_date(
                 &combined_output,
                 &after_version,
@@ -779,8 +794,20 @@ fn evaluate_post_update(
                 }
             }
         }
+        Some(_) => UpdateOutcome::Unverified {
+            reason: "updater returned a non-zero no-op status while the active version changed"
+                .to_string(),
+            path: after_agent.launcher_path,
+            diagnostics,
+        },
         None => {
-            if updater_output_confirms_updated(&combined_output, &after_version, before_agent.id) {
+            if output.success
+                && updater_output_confirms_updated(
+                    &combined_output,
+                    &after_version,
+                    before_agent.id,
+                )
+            {
                 UpdateOutcome::Updated {
                     before: "unknown".to_string(),
                     after: after_version,
@@ -805,6 +832,31 @@ fn evaluate_post_update(
                     diagnostics,
                 }
             }
+        }
+    }
+}
+
+fn rediscovered_matches_selected_installation(
+    before: &DiscoveredAgent,
+    after: &DiscoveredAgent,
+    is_windows: bool,
+) -> bool {
+    if paths_refer_to_same_dir(&before.launcher_path, &after.launcher_path, is_windows) {
+        return true;
+    }
+    match (&before.owner, &after.owner) {
+        (UpdateOwner::WinGet { package_id: a, .. }, UpdateOwner::WinGet { package_id: b, .. }) => {
+            a.eq_ignore_ascii_case(b)
+        }
+        _ => {
+            let Some(before_dir) = before.launcher_path.parent() else {
+                return false;
+            };
+            let Some(after_dir) = after.launcher_path.parent() else {
+                return false;
+            };
+            paths_refer_to_same_dir(before_dir, after_dir, is_windows)
+                && before.launcher_path.exists()
         }
     }
 }
@@ -1067,6 +1119,21 @@ const HOMEBREW_AFFIRMATIVE_PREDICATES: &[&str] = &[
     "is up to date",
 ];
 
+fn is_homebrew_not_upgrading_latest_installed(raw_line: &str, pkg_lower: &str) -> bool {
+    let trimmed = raw_line.trim().to_ascii_lowercase();
+    let clause = trimmed
+        .strip_prefix("warning: ")
+        .or_else(|| trimmed.strip_prefix("==> "))
+        .unwrap_or(&trimmed)
+        .trim_end_matches(['.', '!'])
+        .trim();
+    let s_plain = format!("not upgrading {pkg_lower}, the latest version is already installed");
+    let s_quoted1 = format!("not upgrading '{pkg_lower}', the latest version is already installed");
+    let s_quoted2 =
+        format!("not upgrading \"{pkg_lower}\", the latest version is already installed");
+    clause == s_plain || clause == s_quoted1 || clause == s_quoted2
+}
+
 fn updater_output_confirms_up_to_date(
     text: &str,
     active_version: &str,
@@ -1079,6 +1146,25 @@ fn updater_output_confirms_up_to_date(
 
     let ver_lower = active_version.to_ascii_lowercase();
     for raw_line in text.lines() {
+        match owner {
+            UpdateOwner::HomebrewCask { cask_token, .. }
+                if is_homebrew_not_upgrading_latest_installed(
+                    raw_line,
+                    &cask_token.to_ascii_lowercase(),
+                ) =>
+            {
+                return true;
+            }
+            UpdateOwner::HomebrewFormula { formula, .. }
+                if is_homebrew_not_upgrading_latest_installed(
+                    raw_line,
+                    &formula.to_ascii_lowercase(),
+                ) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
         let Some(clause) = normalize_affirmative_status_clause(raw_line, &ver_lower) else {
             continue;
         };

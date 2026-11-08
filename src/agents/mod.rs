@@ -1356,9 +1356,22 @@ fn emit_update_diagnostics(res: &AgentUpdateResult, stderr: &mut dyn Write) {
                 )
             );
         }
-        UpdateOutcome::DryRun { .. }
-        | UpdateOutcome::Updated { .. }
-        | UpdateOutcome::UpToDate { .. } => {}
+        UpdateOutcome::Updated { diagnostics, .. }
+        | UpdateOutcome::UpToDate { diagnostics, .. } => {
+            if let Some(diag) = diagnostics {
+                let _ = writeln!(
+                    stderr,
+                    "{}",
+                    t!(
+                        "agents.update.diagnostic",
+                        name = res.id.display_name(),
+                        id = res.id.canonical_id(),
+                        detail = diag
+                    )
+                );
+            }
+        }
+        UpdateOutcome::DryRun { .. } => {}
     }
 }
 
@@ -2208,7 +2221,11 @@ mod tests {
         let claude_brew =
             discover_agent(AgentId::ClaudeCode, &env_brew, &runner_brew, &mut cache).unwrap();
         match select_update_plan(&claude_brew) {
-            UpdatePlan::Command { args, .. } => {
+            UpdatePlan::Command {
+                args,
+                env_overrides,
+                ..
+            } => {
                 assert_eq!(
                     args,
                     vec![
@@ -2216,6 +2233,10 @@ mod tests {
                         OsString::from("--cask"),
                         OsString::from("claude-code@latest")
                     ]
+                );
+                assert!(
+                    env_overrides.is_empty(),
+                    "Homebrew upgrade must not force HOMEBREW_NO_AUTO_UPDATE=1: {env_overrides:?}"
                 );
             }
             other => panic!("expected Homebrew cask plan, got {other:?}"),
@@ -2270,6 +2291,95 @@ mod tests {
             }
             other => panic!("expected WinGet plan, got {other:?}"),
         }
+
+        // 2b. WinGet returning APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE (-1978335189 / 0x8A15002B)
+        // with a positive no-newer-release message and verified active version reports `up to date` (exit 0),
+        // whereas the same HRESULT without a no-newer-release message reports `failed` (exit 1).
+        let winget_not_applicable_code: i32 = 0x8A15_002B_u32 as i32;
+        let runner_winget_up_to_date = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                if name.starts_with("winget") {
+                    Ok(ok_output("Anthropic.ClaudeCode 1.0.15"))
+                } else {
+                    Ok(ok_output("1.0.15 (Claude Code)"))
+                }
+            },
+            move |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(winget_not_applicable_code),
+                    success: false,
+                    interrupted: false,
+                    timed_out: false,
+                    stdout:
+                        b"Found Claude Code [Anthropic.ClaudeCode]\nNo available upgrade found.\n"
+                            .to_vec(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let cmd_wg = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: Some(AgentId::ClaudeCode),
+                dry_run: false,
+            }),
+        };
+        let mut wg_out = Vec::new();
+        let mut wg_err = Vec::new();
+        let wg_code = cmd_wg.run_with_io(
+            &env_winget,
+            &runner_winget_up_to_date,
+            &mut wg_out,
+            &mut wg_err,
+        );
+        assert_eq!(wg_code, 0, "expected exit 0 for WinGet no-op HRESULT");
+        assert!(
+            String::from_utf8(wg_out)
+                .unwrap()
+                .contains("up to date (version: 1.0.15"),
+            "expected up to date summary for WinGet no-op HRESULT"
+        );
+
+        let runner_winget_incompat = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                if name.starts_with("winget") {
+                    Ok(ok_output("Anthropic.ClaudeCode 1.0.15"))
+                } else {
+                    Ok(ok_output("1.0.15 (Claude Code)"))
+                }
+            },
+            move |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(winget_not_applicable_code),
+                    success: false,
+                    interrupted: false,
+                    timed_out: false,
+                    stdout: b"Package is not applicable to the current system.\n".to_vec(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let mut wg_fail_out = Vec::new();
+        let mut wg_fail_err = Vec::new();
+        let wg_fail_code = cmd_wg.run_with_io(
+            &env_winget,
+            &runner_winget_incompat,
+            &mut wg_fail_out,
+            &mut wg_fail_err,
+        );
+        assert_eq!(
+            wg_fail_code, 1,
+            "WinGet HRESULT without positive no-newer-release message must fail"
+        );
+        assert!(
+            String::from_utf8(wg_fail_out).unwrap().contains("failed"),
+            "expected failed summary when WinGet HRESULT is not a no-newer-release status"
+        );
     }
 
     #[test]
@@ -2857,6 +2967,170 @@ mod tests {
             cmd_agy.run_with_io(&env_agy, &runner_agy_check, &mut stdout_ac, &mut stderr_ac);
         assert_eq!(code_ac, 1);
         assert!(String::from_utf8(stdout_ac).unwrap().contains("unverified"));
+
+        // 5b. Homebrew's package-specific cask no-op ("Warning: Not upgrading codex, the latest version is already installed")
+        // reports `up to date` (exit 0), whereas a mismatched package token remains `unverified` (exit 1).
+        let owner_prefix_str3 = owner_prefix.to_string_lossy().into_owned();
+        let runner_brew_noop_ok = FakeProcessRunner::new(
+            move |req| {
+                if req.args.iter().any(|a| a == "--prefix") {
+                    Ok(ok_output(&owner_prefix_str3))
+                } else if req.args.iter().any(|a| a == "list") {
+                    Ok(ok_output("codex\n"))
+                } else {
+                    Ok(ok_output("codex 0.118.0"))
+                }
+            },
+            |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(0),
+                    success: true,
+                    interrupted: false,
+                    timed_out: false,
+                    stdout: Vec::new(),
+                    stderr:
+                        b"Warning: Not upgrading codex, the latest version is already installed\n"
+                            .to_vec(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let mut stdout_noop_ok = Vec::new();
+        let mut stderr_noop_ok = Vec::new();
+        let code_noop_ok = cmd.run_with_io(
+            &env,
+            &runner_brew_noop_ok,
+            &mut stdout_noop_ok,
+            &mut stderr_noop_ok,
+        );
+        assert_eq!(code_noop_ok, 0);
+        assert!(
+            String::from_utf8(stdout_noop_ok)
+                .unwrap()
+                .contains("up to date (version: 0.118.0")
+        );
+
+        let owner_prefix_str4 = owner_prefix.to_string_lossy().into_owned();
+        let runner_brew_noop_wrong_pkg = FakeProcessRunner::new(
+            move |req| {
+                if req.args.iter().any(|a| a == "--prefix") {
+                    Ok(ok_output(&owner_prefix_str4))
+                } else if req.args.iter().any(|a| a == "list") {
+                    Ok(ok_output("codex\n"))
+                } else {
+                    Ok(ok_output("codex 0.118.0"))
+                }
+            },
+            |_| {
+                Ok(ok_output(
+                    "Warning: Not upgrading other-cask, the latest version is already installed",
+                ))
+            },
+        );
+        let mut stdout_noop_wrong = Vec::new();
+        let mut stderr_noop_wrong = Vec::new();
+        let code_noop_wrong = cmd.run_with_io(
+            &env,
+            &runner_brew_noop_wrong_pkg,
+            &mut stdout_noop_wrong,
+            &mut stderr_noop_wrong,
+        );
+        assert_eq!(code_noop_wrong, 1);
+        assert!(
+            String::from_utf8(stdout_noop_wrong)
+                .unwrap()
+                .contains("unverified")
+        );
+
+        // 6. Successful update preserves nonempty updater diagnostics on stderr (FR-009).
+        let agy_versions = Mutex::new(VecDeque::from(vec![
+            "Antigravity CLI 1.0.0",
+            "Antigravity CLI 1.1.0",
+        ]));
+        let runner_agy_diag = FakeProcessRunner::new(
+            move |_| {
+                let v = agy_versions
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or("Antigravity CLI 1.1.0");
+                Ok(ok_output(v))
+            },
+            |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(0),
+                    success: true,
+                    interrupted: false,
+                    timed_out: false,
+                    stdout: b"Updated Antigravity to 1.1.0\n".to_vec(),
+                    stderr: b"Warning: restart your shell to complete setup\n".to_vec(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let mut stdout_diag = Vec::new();
+        let mut stderr_diag = Vec::new();
+        let code_diag = cmd_agy.run_with_io(
+            &env_agy,
+            &runner_agy_diag,
+            &mut stdout_diag,
+            &mut stderr_diag,
+        );
+        assert_eq!(code_diag, 0);
+        assert!(
+            String::from_utf8(stdout_diag)
+                .unwrap()
+                .contains("updated (1.0.0 -> 1.1.0")
+        );
+        let stderr_diag_str = String::from_utf8(stderr_diag).unwrap();
+        assert!(
+            stderr_diag_str.contains("Warning: restart your shell to complete setup"),
+            "successful update must preserve vendor diagnostics on stderr: {stderr_diag_str}"
+        );
+
+        // 7. Deletion of the selected PATH executable when a shadowed copy exists in a later PATH
+        // directory must report `failed` (exit 1), even if the shadowed copy has a different version.
+        let primary_agy_dir = tmp.path().join("primary-agy-bin");
+        let shadowed_agy_dir = tmp.path().join("shadowed-agy-bin");
+        let primary_agy_bin = primary_agy_dir.join("agy");
+        let shadowed_agy_bin = shadowed_agy_dir.join("agy");
+        create_executable(&primary_agy_bin, "#!/bin/sh\n");
+        create_executable(&shadowed_agy_bin, "#!/bin/sh\n");
+        let env_shadow = test_env(&[&primary_agy_dir, &shadowed_agy_dir], &home);
+        let primary_for_probe = primary_agy_bin.clone();
+        let primary_for_update = primary_agy_bin.clone();
+        let runner_delete_shadow = FakeProcessRunner::new(
+            move |req| {
+                if req.program == primary_for_probe {
+                    Ok(ok_output("Antigravity CLI 1.1.0"))
+                } else {
+                    Ok(ok_output("Antigravity CLI 1.0.0"))
+                }
+            },
+            move |_| {
+                let _ = fs::remove_file(&primary_for_update);
+                Ok(ok_output("Removed primary binary"))
+            },
+        );
+        let mut stdout_shadow = Vec::new();
+        let mut stderr_shadow = Vec::new();
+        let code_shadow = cmd_agy.run_with_io(
+            &env_shadow,
+            &runner_delete_shadow,
+            &mut stdout_shadow,
+            &mut stderr_shadow,
+        );
+        assert_eq!(
+            code_shadow, 1,
+            "deleting primary binary and falling through to shadowed copy must fail"
+        );
+        let stdout_shadow_str = String::from_utf8(stdout_shadow).unwrap();
+        assert!(
+            stdout_shadow_str.contains("failed"),
+            "expected failed outcome when primary binary disappears and falls back to shadowed copy: {stdout_shadow_str}"
+        );
     }
 
     #[test]
