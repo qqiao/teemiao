@@ -91,9 +91,13 @@ Do not alter the specification independently; ask the leader about conflicts.
   Run the four mandated self-reviews and report findings/resolutions.
   Verification: Updated `README.md`, `tests/agents_cli.rs`, `tests/support/mod.rs`,
   and locales; verified all `plan.md` commands locally on macOS (`darwin`/`aarch64`)
-  and completed all 4 self-reviews. Left unchecked because pushing
-  `.github/workflows/rust.yml` is blocked by GitHub (`refusing to allow an OAuth App
-  to create or update workflow .github/workflows/rust.yml without workflow scope`).
+  and completed all 4 self-reviews. The Linux/macOS/Windows workflow matrix was
+  delivered in `a014af0` through the connected GitHub integration; the earlier
+  Git OAuth workflow-scope rejection no longer blocks workflow delivery.
+  Independent macOS verification at `950249e`: 34 unit + 24 integration tests,
+  formatting, strict Clippy, build, and patch checks pass. T007 remains unchecked:
+  Windows-target strict Clippy fails on unused `target_agent` at
+  `tests/agents_cli.rs:1402`; native Linux/Windows execution is still pending.
   Dependency: T006.
 
 - [ ] **T008 — Independent leader review and GitHub PR** (Leader/Coder).
