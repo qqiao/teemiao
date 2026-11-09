@@ -2509,4 +2509,112 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
         "rejected qoder candidate must perform zero updater invocations: {:?}",
         sb_dir_id.invocations()
     );
+
+    // 7. Exact npm entry-point binding (`"bin": {"qoder": "bin/qoder.js"}`):
+    // extensionless `bin/qoder` and `.exe` `bin/qoder.exe` siblings must NOT match `bin/qoder.js`,
+    // while the exact declared `bin/qoder.js` entry point succeeds via npm update.
+    for target_name in ["qoder", "qoder.exe", "qoder.js"] {
+        let sb_ep = TestSandbox::new();
+        let ep_prefix = sb_ep.root.join("npm");
+        let ep_bin = ep_prefix.join("bin");
+        let ep_pkg = ep_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        let ep_pkg_bin = ep_pkg.join("bin");
+        fs::create_dir_all(&ep_bin).unwrap();
+        fs::create_dir_all(&ep_pkg_bin).unwrap();
+        fs::write(
+            ep_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qoder":"bin/qoder.js"}}"#,
+        )
+        .unwrap();
+
+        let target_path = ep_pkg_bin.join(target_name);
+        let (installed_bin, _) = sb_ep.install_fake_tool_in(
+            &ep_pkg_bin,
+            "qoder",
+            &[
+                ("version_stdout", "1.2.3"),
+                ("help_stdout", "Usage: index-tool"),
+                ("update_stdout", "Native update should never run"),
+            ],
+        );
+        if installed_bin != target_path {
+            fs::copy(&installed_bin, &target_path).unwrap();
+        }
+        let declared_js = ep_pkg_bin.join("qoder.js");
+        if !declared_js.exists() {
+            fs::copy(&installed_bin, &declared_js).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target_path, ep_bin.join("qoder")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            sb_ep.install_fake_tool_in(
+                &ep_bin,
+                "node",
+                &[
+                    ("version_stdout", "1.2.3"),
+                    ("help_stdout", "Usage: index-tool"),
+                ],
+            );
+            fs::write(
+                ep_bin.join("qoder.cmd"),
+                format!(
+                    "@echo off\r\n\"%~dp0\\node.exe\" \"{}\" %*\r\n",
+                    target_path.display()
+                ),
+            )
+            .unwrap();
+        }
+        sb_ep.install_fake_tool_in(
+            &ep_bin,
+            "npm",
+            &[("update_stdout", "Qoder CLI is up to date")],
+        );
+
+        let out_ep = sb_ep.run_teemiao(&["agents", "update", "qoder"], &[&ep_bin], &[]);
+        let ep_invocations = sb_ep.invocations();
+        if target_name == "qoder.js" {
+            assert_eq!(
+                out_ep.status.code(),
+                Some(0),
+                "exact declared entry point `bin/qoder.js` should succeed: stdout={} stderr={}",
+                String::from_utf8_lossy(&out_ep.stdout),
+                String::from_utf8_lossy(&out_ep.stderr)
+            );
+            assert!(
+                ep_invocations
+                    .iter()
+                    .any(|l| l.starts_with("TOOL=npm|") && l.contains("@qoder-ai/qodercli@latest")),
+                "exact declared entry point must invoke npm update: {ep_invocations:?}"
+            );
+            assert!(
+                !ep_invocations.iter().any(|l| l.contains("--help")),
+                "proven npm entry point should not require a --help probe: {ep_invocations:?}"
+            );
+        } else {
+            assert_eq!(
+                out_ep.status.code(),
+                Some(1),
+                "mismatched sibling `{target_name}` must be rejected: stdout={} stderr={}",
+                String::from_utf8_lossy(&out_ep.stdout),
+                String::from_utf8_lossy(&out_ep.stderr)
+            );
+            assert!(
+                !ep_invocations
+                    .iter()
+                    .any(|l| l.starts_with("TOOL=npm|") || l.contains("|ARGS=update|")),
+                "mismatched sibling `{target_name}` must perform zero npm/native update calls: {ep_invocations:?}"
+            );
+            assert!(
+                ep_invocations.iter().any(|l| l.contains("--help")),
+                "mismatched sibling `{target_name}` must fall back to --help probe and be rejected: {ep_invocations:?}"
+            );
+        }
+    }
 }

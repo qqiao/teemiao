@@ -4618,12 +4618,36 @@ fn main() -> ExitCode {
             "shared `qoder` not matching package.json `bin` entry point must be rejected"
         );
 
-        // Positive entry-point-bound `qoder` in package.json `bin` succeeds as NpmGlobal
+        // Positive entry-point-bound `qoder` in package.json `bin` succeeds as NpmGlobal,
+        // while extensionless `bin/qoder` and `.exe` `bin/qoder.exe` siblings must NOT match `"bin": {"qoder": "bin/qoder.js"}`
         fs::write(
             unbound_pkg_dir.join("package.json"),
             r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qoder":"bin/qoder.js","qodercli":"bin/qodercli.js"}}"#,
         )
         .unwrap();
+        create_executable(
+            &unbound_pkg_dir.join("bin").join("qoder.js"),
+            "#!/bin/sh\nprintf 'Qoder CLI 1.2.3\\n'\n",
+        );
+        for wrong_sibling in ["qoder", "qoder.exe"] {
+            let sibling_path = unbound_pkg_dir.join("bin").join(wrong_sibling);
+            create_executable(&sibling_path, "#!/bin/sh\nprintf '1.2.3\\n'\n");
+            create_executable(
+                &unbound_npm_bin.join("qoder"),
+                &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", sibling_path.display()),
+            );
+            let mut cache_sibling = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_unbound_npm,
+                    &runner_index_tool,
+                    &mut cache_sibling
+                )
+                .is_none(),
+                "sibling `{wrong_sibling}` must not match declared entry point `bin/qoder.js`"
+            );
+        }
         create_executable(
             &unbound_npm_bin.join("qoder"),
             &format!(
@@ -4646,7 +4670,79 @@ fn main() -> ExitCode {
             qoder_bound.owner,
             UpdateOwner::NpmGlobal {
                 npm_program: unbound_npm_bin.join("npm"),
-                prefix: unbound_npm_prefix,
+                prefix: unbound_npm_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // Windows `.cmd` shim entry-point binding: `qoder.cmd` targeting `bin\qoder` or `bin\qoder.exe`
+        // must not match `"bin": {"qoder": "bin/qoder.js"}`, while `bin\qoder.js` succeeds
+        let win_ep_prefix = tmp.path().join("win-npm-ep");
+        let win_ep_pkg = win_ep_prefix
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(win_ep_pkg.join("bin")).unwrap();
+        fs::write(
+            win_ep_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qoder":"bin/qoder.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &win_ep_pkg.join("bin").join("qoder.js"),
+            "// qoder.js entry\n",
+        );
+        create_executable(&win_ep_prefix.join("npm.cmd"), "@echo off\r\n");
+        let env_win_ep = DiscoveryEnv {
+            path: std::env::join_paths([&win_ep_prefix]).unwrap(),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: Some(home.join("AppData").join("Local")),
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        for wrong_win_target in ["qoder", "qoder.exe"] {
+            create_executable(
+                &win_ep_pkg.join("bin").join(wrong_win_target),
+                "binary sibling",
+            );
+            create_executable(
+                &win_ep_prefix.join("qoder.cmd"),
+                &format!(
+                    "@echo off\r\n\"%~dp0\\node.exe\" \"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\{wrong_win_target}\" %*\r\n"
+                ),
+            );
+            let mut cache_win_wrong = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_win_ep,
+                    &runner_index_tool,
+                    &mut cache_win_wrong
+                )
+                .is_none(),
+                "Windows .cmd shim targeting `{wrong_win_target}` must not match `bin/qoder.js`"
+            );
+        }
+        create_executable(
+            &win_ep_prefix.join("qoder.cmd"),
+            "@echo off\r\n\"%~dp0\\node.exe\" \"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\qoder.js\" %*\r\n",
+        );
+        let mut cache_win_ok = PackageManagerCache::new();
+        let qoder_win_ok = discover_agent(
+            AgentId::Qoder,
+            &env_win_ep,
+            &runner_bound_qoder,
+            &mut cache_win_ok,
+        )
+        .unwrap();
+        assert_eq!(
+            qoder_win_ok.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: win_ep_prefix.join("npm.cmd"),
+                prefix: win_ep_prefix,
                 package: "@qoder-ai/qodercli".to_string(),
             }
         );

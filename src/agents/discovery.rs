@@ -2760,8 +2760,13 @@ fn verify_package_json_entrypoint(
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
-            return (launcher_stem.eq_ignore_ascii_case(default_cmd)
-                || launcher_stem.eq_ignore_ascii_case(declared_stem))
+            let cmd_matches = if expected_pkg.eq_ignore_ascii_case("@qoder-ai/qodercli") {
+                launcher_stem.eq_ignore_ascii_case(default_cmd)
+            } else {
+                launcher_stem.eq_ignore_ascii_case(default_cmd)
+                    || launcher_stem.eq_ignore_ascii_case(declared_stem)
+            };
+            return cmd_matches
                 && target_matches_declared_bin_path(pkg_root, target_in_pkg, rel_bin, is_windows);
         }
         return false;
@@ -2787,27 +2792,12 @@ fn target_matches_declared_bin_path(
         return false;
     }
     let declared = normalize_lexical_path(&pkg_root.join(trimmed_rel));
-    let canon_declared = canonicalize_clean(&declared);
+    let canon_pkg_declared =
+        normalize_lexical_path(&canonicalize_clean(pkg_root).join(trimmed_rel));
     let norm_target = normalize_lexical_path(target_in_pkg);
-    let canon_target = canonicalize_clean(target_in_pkg);
 
-    if paths_refer_to_same_dir(&norm_target, &declared, is_windows)
-        || paths_refer_to_same_dir(&canon_target, &canon_declared, is_windows)
-    {
-        return true;
-    }
-
-    if let (Some(target_parent), Some(declared_parent), Some(t_stem), Some(d_stem)) = (
-        norm_target.parent(),
-        declared.parent(),
-        norm_target.file_stem().and_then(|s| s.to_str()),
-        declared.file_stem().and_then(|s| s.to_str()),
-    ) {
-        return paths_refer_to_same_dir(target_parent, declared_parent, is_windows)
-            && t_stem.eq_ignore_ascii_case(d_stem);
-    }
-
-    false
+    paths_refer_to_same_dir(&norm_target, &declared, is_windows)
+        || paths_refer_to_same_dir(&norm_target, &canon_pkg_declared, is_windows)
 }
 
 fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
