@@ -2318,9 +2318,7 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
     {
         fs::write(
             npm_bin.join("qodercli.cmd"),
-            format!(
-                "@echo off\r\n\"%~dp0\\..\\lib\\node_modules\\@qoder-ai\\qodercli\\bin\\qodercli.exe\" %*\r\n"
-            ),
+            format!("@echo off\r\n\"{}\" %*\r\n", real_qodercli.display()),
         )
         .unwrap();
     }
@@ -2364,5 +2362,151 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
             .iter()
             .any(|l| l.contains("TOOL=npm|") && l.contains("@qoder-ai/qodercli@latest")),
         "expected npm install -g --prefix <prefix> @qoder-ai/qodercli@latest invocation"
+    );
+
+    // 4. Cross-prefix Homebrew wrapper (`wrapper/bin/qodercli` -> `separate-brew/Cellar/qodercli/0.9.0/bin/qodercli`)
+    // must require manual action and perform zero updater invocations
+    let sb_brew_wrap = TestSandbox::new();
+    let wrapper_bin = sb_brew_wrap.root.join("wrapper").join("bin");
+    let cellar_bin = sb_brew_wrap
+        .root
+        .join("separate-brew")
+        .join("Cellar")
+        .join("qodercli")
+        .join("0.9.0")
+        .join("bin");
+    fs::create_dir_all(&wrapper_bin).unwrap();
+    let (cellar_qodercli, _) = sb_brew_wrap.install_fake_tool_in(
+        &cellar_bin,
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI 0.9.0"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+            ("update_stdout", "Qoder CLI is up to date"),
+        ],
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let launcher = wrapper_bin.join("qodercli");
+        fs::write(
+            &launcher,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", cellar_qodercli.display()),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&launcher).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&launcher, perms).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            wrapper_bin.join("qodercli.cmd"),
+            format!("@echo off\r\n\"{}\" %*\r\n", cellar_qodercli.display()),
+        )
+        .unwrap();
+    }
+    let out_brew_wrap =
+        sb_brew_wrap.run_teemiao(&["agents", "update", "qoder"], &[&wrapper_bin], &[]);
+    assert_eq!(out_brew_wrap.status.code(), Some(1));
+    let stdout_brew_wrap = String::from_utf8_lossy(&out_brew_wrap.stdout);
+    assert!(
+        stdout_brew_wrap.contains("manual action required"),
+        "cross-prefix Homebrew wrapper must require manual action: {stdout_brew_wrap}"
+    );
+    assert!(
+        !sb_brew_wrap
+            .invocations()
+            .iter()
+            .any(|l| l.contains("|ARGS=update|")),
+        "cross-prefix Homebrew wrapper must perform zero updater invocations: {:?}",
+        sb_brew_wrap.invocations()
+    );
+
+    // 5. Negated help text and failed help probe must require manual action and perform zero updater invocations
+    for (help_exit, help_text) in [
+        (
+            "0",
+            "Qoder CLI<NL>Do not run qodercli update; use your package manager.",
+        ),
+        (
+            "1",
+            "Qoder CLI<NL>Error: qodercli update is disabled by policy",
+        ),
+    ] {
+        let sb_neg = TestSandbox::new();
+        sb_neg.install_fake_tool(
+            "qodercli",
+            &[
+                ("version_stdout", "Qoder CLI 0.9.0"),
+                ("help_stdout", help_text),
+                ("help_exit", help_exit),
+                ("update_stdout", "Qoder CLI is up to date"),
+            ],
+        );
+        let out_neg = sb_neg.run_teemiao(&["agents", "update", "qoder"], &[&sb_neg.bin_dir], &[]);
+        assert_eq!(out_neg.status.code(), Some(1));
+        let stdout_neg = String::from_utf8_lossy(&out_neg.stdout);
+        assert!(
+            stdout_neg.contains("manual action required"),
+            "expected manual action required for help_exit={help_exit} help={help_text}: {stdout_neg}"
+        );
+        assert!(
+            !sb_neg
+                .invocations()
+                .iter()
+                .any(|l| l.contains("|ARGS=update|")),
+            "negated or failed help probe must perform zero updater invocations: {:?}",
+            sb_neg.invocations()
+        );
+    }
+
+    // 6. Directory name `.qodercli/bin` and nearby `package.json` cannot establish CLI identity for shared `qoder`
+    let sb_dir_id = TestSandbox::new();
+    let dot_qodercli = sb_dir_id.root.join(".qodercli");
+    let dot_qodercli_bin = dot_qodercli.join("bin");
+    fs::create_dir_all(&dot_qodercli_bin).unwrap();
+    fs::write(
+        dot_qodercli.join("package.json"),
+        r#"{"name":"@qoder-ai/qodercli","version":"1.2.3"}"#,
+    )
+    .unwrap();
+    sb_dir_id.install_fake_tool_in(
+        &dot_qodercli_bin,
+        "qoder",
+        &[
+            ("version_stdout", "1.2.3"),
+            (
+                "help_stdout",
+                "Usage: index-tool<NL>Commands:<NL>  update  Rebuild the document index",
+            ),
+            ("update_stdout", "Qoder CLI is up to date"),
+        ],
+    );
+    let out_dir_list = sb_dir_id.run_teemiao(&["agents", "list"], &[&dot_qodercli_bin], &[]);
+    assert_eq!(out_dir_list.status.code(), Some(0));
+    let stdout_dir_list = String::from_utf8_lossy(&out_dir_list.stdout);
+    assert!(
+        stdout_dir_list.contains("No supported AI coding-agent CLIs were found on PATH."),
+        "shared qoder under .qodercli/bin with index-tool help must not be discovered: {stdout_dir_list}"
+    );
+    let out_dir_up =
+        sb_dir_id.run_teemiao(&["agents", "update", "qoder"], &[&dot_qodercli_bin], &[]);
+    assert_eq!(out_dir_up.status.code(), Some(1));
+    let stderr_dir_up = String::from_utf8_lossy(&out_dir_up.stderr);
+    assert!(
+        stderr_dir_up.contains("Error: agent 'Qoder' (qoder) is not installed on PATH."),
+        "shared qoder under .qodercli/bin must be rejected before update: {stderr_dir_up}"
+    );
+    assert!(
+        !sb_dir_id
+            .invocations()
+            .iter()
+            .any(|l| l.contains("|ARGS=update|")),
+        "rejected qoder candidate must perform zero updater invocations: {:?}",
+        sb_dir_id.invocations()
     );
 }

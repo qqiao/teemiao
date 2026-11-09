@@ -645,9 +645,11 @@ fn try_verify_qoder_candidate(
     env: &DiscoveryEnv,
     runner: &dyn ProcessRunner,
 ) -> Option<DiscoveredAgent> {
-    let has_local_qoder_cli_evidence = path_has_qoder_cli_evidence(&launcher_path, &resolved_path);
+    let wrapper_targets = collect_verified_wrapper_targets(&launcher_path, &resolved_path);
     if path_has_qoder_desktop_bundle(&launcher_path, &resolved_path)
-        && !has_local_qoder_cli_evidence
+        || wrapper_targets
+            .iter()
+            .any(|(t, rt)| path_has_qoder_desktop_bundle(t, rt))
     {
         return None;
     }
@@ -655,7 +657,15 @@ fn try_verify_qoder_candidate(
     let is_dedicated_cli_name = candidate.eq_ignore_ascii_case("qodercli");
 
     if env.is_windows && is_unsafe_windows_cmd_shim(&launcher_path) {
-        if !is_dedicated_cli_name && !has_local_qoder_cli_evidence {
+        let npm_entry_verified = detect_npm_ownership(
+            &launcher_path,
+            &resolved_path,
+            None,
+            "@qoder-ai/qodercli",
+            env.is_windows,
+        )
+        .is_some();
+        if !is_dedicated_cli_name && !npm_entry_verified {
             return None;
         }
         let warning = t!(
@@ -727,20 +737,24 @@ fn try_verify_qoder_candidate(
                     String::from_utf8_lossy(&help_out.stdout),
                     String::from_utf8_lossy(&help_out.stderr)
                 );
-                if has_qoder_desktop_or_ide_signature(&combined_help) {
+                if has_qoder_desktop_or_ide_signature(&combined_help)
+                    || help_has_conflicting_usage_program(&combined_help)
+                {
                     return None;
                 }
-                help_text = Some(combined_help);
+                if help_out.success {
+                    help_text = Some(combined_help);
+                }
             }
 
             let is_verified_cli = npm_signal.is_some()
-                || has_local_qoder_cli_evidence
                 || version_has_qoder_cli_branding(&version_text)
                 || help_text
                     .as_deref()
                     .is_some_and(help_has_qoder_cli_evidence)
                 || (is_dedicated_cli_name
-                    && (!version_out.success || version_has_qoder_or_bare_version(&version_text)));
+                    && (!version_out.success
+                        || version_text.to_ascii_lowercase().contains("qoder")));
 
             if !is_verified_cli {
                 return None;
@@ -768,7 +782,14 @@ fn try_verify_qoder_candidate(
             })
         }
         Err(err) => {
-            if !is_dedicated_cli_name && !has_local_qoder_cli_evidence {
+            let npm_signal = detect_npm_ownership(
+                &launcher_path,
+                &resolved_path,
+                None,
+                "@qoder-ai/qodercli",
+                env.is_windows,
+            );
+            if !is_dedicated_cli_name && npm_signal.is_none() {
                 return None;
             }
             warnings.push(
@@ -779,13 +800,6 @@ fn try_verify_qoder_candidate(
                     detail = err.to_string()
                 )
                 .to_string(),
-            );
-            let npm_signal = detect_npm_ownership(
-                &launcher_path,
-                &resolved_path,
-                None,
-                "@qoder-ai/qodercli",
-                env.is_windows,
             );
             let owner =
                 determine_qoder_owner(&launcher_path, &resolved_path, None, npm_signal, false, env);
@@ -809,31 +823,6 @@ fn path_has_qoder_desktop_bundle(launcher_path: &Path, resolved_path: &Path) -> 
             .to_ascii_lowercase();
         if normalized.contains("/qoder.app/") {
             return true;
-        }
-    }
-    false
-}
-
-fn path_has_qoder_cli_evidence(launcher_path: &Path, resolved_path: &Path) -> bool {
-    for path in [launcher_path, resolved_path] {
-        let normalized = path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        if normalized.contains("/@qoder-ai/qodercli/") || normalized.contains("/.qodercli/") {
-            return true;
-        }
-        if let Some(parent) = path.parent() {
-            for candidate_dir in [Some(parent), parent.parent()].into_iter().flatten() {
-                let pkg_json = candidate_dir.join("package.json");
-                if let Ok(contents) = fs::read_to_string(pkg_json)
-                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
-                    && let Some(name) = val.get("name").and_then(|n| n.as_str())
-                    && name.eq_ignore_ascii_case("@qoder-ai/qodercli")
-                {
-                    return true;
-                }
-            }
         }
     }
     false
@@ -911,35 +900,333 @@ fn version_has_qoder_cli_branding(text: &str) -> bool {
         || lower.contains("@qoder-ai/qodercli")
 }
 
-fn version_has_qoder_or_bare_version(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("qoder") || parse_version_text(text).is_some()
+fn help_has_conflicting_usage_program(help_text: &str) -> bool {
+    for raw_line in help_text.lines() {
+        let trimmed = raw_line.trim();
+        let Some(rest) = strip_ascii_prefix_case_insensitive(trimmed, "usage:") else {
+            continue;
+        };
+        let Some(first_token) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if first_token.starts_with('[') || first_token.starts_with('-') {
+            continue;
+        }
+        let base = first_token
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(first_token);
+        let cleaned = base
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.');
+        let stem = Path::new(cleaned)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(cleaned);
+        if !stem.is_empty()
+            && !stem.eq_ignore_ascii_case("qoder")
+            && !stem.eq_ignore_ascii_case("qodercli")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn help_has_qoder_cli_evidence(help_text: &str) -> bool {
+    if has_qoder_desktop_or_ide_signature(help_text)
+        || help_has_conflicting_usage_program(help_text)
+    {
+        return false;
+    }
     let lower = help_text.to_ascii_lowercase();
     version_has_qoder_cli_branding(&lower)
-        || (lower.contains("qoder") && help_supports_qoder_native_update(&lower))
+        || (lower.contains("qoder") && help_supports_qoder_native_update(help_text))
+}
+
+fn line_negates_or_rejects_update(lower_line: &str) -> bool {
+    const NEGATION_AND_REJECTION_PATTERNS: &[&str] = &[
+        "do not",
+        "don't",
+        "dont",
+        "never",
+        "cannot",
+        "can't",
+        "cant",
+        "must not",
+        "should not",
+        "shouldn't",
+        "is not",
+        "are not",
+        "not supported",
+        "unsupported",
+        "not available",
+        "unavailable",
+        "not allowed",
+        "disallowed",
+        "not permitted",
+        "forbidden",
+        "prohibited",
+        "disabled",
+        "deprecated",
+        "removed",
+        "instead",
+        "package manager",
+        "use brew",
+        "use npm",
+        "manually",
+        "error",
+        "fatal",
+        "failed",
+        "denied",
+        "policy",
+    ];
+    NEGATION_AND_REJECTION_PATTERNS
+        .iter()
+        .any(|pat| lower_line.contains(pat))
+}
+
+fn is_prose_auxiliary_token(token: &str) -> bool {
+    matches!(
+        token,
+        "is" | "was"
+            | "are"
+            | "were"
+            | "has"
+            | "have"
+            | "had"
+            | "will"
+            | "would"
+            | "can"
+            | "cannot"
+            | "could"
+            | "should"
+            | "must"
+            | "may"
+            | "might"
+            | "failed"
+            | "disabled"
+    )
+}
+
+fn description_targets_unrelated_artifact(lower_desc: &str) -> bool {
+    const UNRELATED_TARGETS: &[&str] = &[
+        "index",
+        "database",
+        "schema",
+        "cache",
+        "submodule",
+        "snapshot",
+        "document",
+    ];
+    UNRELATED_TARGETS.iter().any(|t| lower_desc.contains(t))
 }
 
 fn help_supports_qoder_native_update(help_text: &str) -> bool {
+    if has_qoder_desktop_or_ide_signature(help_text)
+        || help_has_conflicting_usage_program(help_text)
+    {
+        return false;
+    }
+    let full_lower = help_text.to_ascii_lowercase();
+    if !full_lower.contains("qoder") {
+        return false;
+    }
+    let has_cli_branding = version_has_qoder_cli_branding(&full_lower);
+
     for raw_line in help_text.lines() {
         let lower = raw_line.trim().to_ascii_lowercase();
         if lower.is_empty() {
             continue;
         }
-        if lower.contains("qodercli update") || lower.contains("qoder update") {
-            return true;
+        if lower.starts_with("error:") || lower.starts_with("fatal:") {
+            return false;
         }
-        let mut tokens = lower.split_whitespace();
+        if (lower.contains("update") || lower.contains("upgrade"))
+            && line_negates_or_rejects_update(&lower)
+        {
+            return false;
+        }
+    }
+
+    for raw_line in help_text.lines() {
+        let lower = raw_line.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        if let Some(usage_rest) = lower.strip_prefix("usage:") {
+            let tokens: Vec<&str> = usage_rest.split_whitespace().collect();
+            if tokens.len() >= 2
+                && matches!(tokens[0], "qodercli" | "qoder")
+                && tokens[1] == "update"
+                && tokens.get(2).is_none_or(|t| !is_prose_auxiliary_token(t))
+            {
+                return true;
+            }
+            continue;
+        }
+
+        let entry = lower
+            .strip_prefix("- ")
+            .or_else(|| lower.strip_prefix("* "))
+            .unwrap_or(&lower)
+            .trim_start();
+
+        for prefix in ["qodercli update", "qoder update"] {
+            if let Some(rest) = entry.strip_prefix(prefix)
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            {
+                let rest_trimmed = rest.trim();
+                let first_rest = rest_trimmed.split_whitespace().next().unwrap_or("");
+                if !is_prose_auxiliary_token(first_rest)
+                    && !description_targets_unrelated_artifact(rest_trimmed)
+                {
+                    return true;
+                }
+            }
+        }
+
+        let mut tokens = entry.split_whitespace();
         if let Some(first) = tokens.next() {
             let cleaned = first.trim_matches(|c: char| matches!(c, ',' | ':' | '|'));
             if cleaned == "update" {
+                let rest_tokens: Vec<&str> = tokens.collect();
+                if rest_tokens
+                    .first()
+                    .is_some_and(|t| is_prose_auxiliary_token(t))
+                {
+                    continue;
+                }
+                let rest_joined = rest_tokens.join(" ");
+                if description_targets_unrelated_artifact(&rest_joined) {
+                    continue;
+                }
+                let desc_has_positive_update_target = rest_joined.contains("qoder")
+                    || rest_joined.contains("cli")
+                    || rest_joined.contains("self")
+                    || rest_joined.contains("latest")
+                    || rest_joined.contains("version");
+                if has_cli_branding || desc_has_positive_update_target {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn collect_verified_wrapper_targets(
+    launcher_path: &Path,
+    resolved_path: &Path,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut out = Vec::new();
+    let mut visited = vec![launcher_path.to_path_buf(), resolved_path.to_path_buf()];
+    let mut frontier = vec![launcher_path.to_path_buf()];
+    if resolved_path != launcher_path {
+        frontier.push(resolved_path.to_path_buf());
+    }
+
+    for _ in 0..4 {
+        let mut next_frontier = Vec::new();
+        for current in frontier {
+            if let Some(exec_target) = extract_verified_wrapper_exec_target(&current) {
+                let resolved_target = canonicalize_clean(&exec_target);
+                let pair = (exec_target.clone(), resolved_target.clone());
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+                for candidate in [exec_target, resolved_target] {
+                    if !visited.contains(&candidate) {
+                        visited.push(candidate.clone());
+                        next_frontier.push(candidate);
+                    }
+                }
+            }
+        }
+        if next_frontier.is_empty() {
+            break;
+        }
+        frontier = next_frontier;
+    }
+    out
+}
+
+fn has_unverified_wrapper_forwarding(launcher_path: &Path, resolved_path: &Path) -> bool {
+    for path in [launcher_path, resolved_path] {
+        let Some(sample) = read_text_wrapper_sample(path) else {
+            continue;
+        };
+        let lower = sample.to_ascii_lowercase();
+        if lower.contains("/cellar/")
+            || lower.contains("\\cellar\\")
+            || lower.contains("/caskroom/")
+            || lower.contains("\\caskroom\\")
+            || lower.contains("node_modules")
+            || lower.contains("@qoder-ai/qodercli")
+            || lower.contains("/.bun/")
+            || lower.contains("/.pnpm/")
+            || lower.contains("/.yarn/")
+            || lower.contains("/nix/store/")
+            || lower.contains("microsoft/winget/")
+        {
+            return true;
+        }
+        for raw_line in sample.lines() {
+            let trimmed = raw_line.trim();
+            if is_wrapper_comment_or_empty_line(trimmed) {
+                continue;
+            }
+            if trimmed.contains("\"$@\"")
+                || trimmed.contains("\"$*\"")
+                || trimmed.contains("%*")
+                || trimmed.starts_with("exec ")
+                || trimmed.contains(" exec ")
+            {
                 return true;
             }
         }
     }
     false
+}
+
+fn detect_homebrew_in_target_prefix(
+    target_path: &Path,
+    resolved_target_path: &Path,
+    active_version: Option<&str>,
+    agent_key: &str,
+) -> Vec<ManagerSignal> {
+    let mut out = Vec::new();
+    for path in [target_path, resolved_target_path] {
+        if let Some(bin_dir) = path.parent()
+            && bin_dir
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+            && let Some(prefix) = bin_dir.parent()
+        {
+            let caskroom = prefix.join("Caskroom");
+            if caskroom.is_dir() {
+                for cask_token in find_matching_casks_in_dir(&caskroom, agent_key, active_version) {
+                    let sig = ManagerSignal::HomebrewCask {
+                        brew_prefix: prefix.to_path_buf(),
+                        cask_token,
+                    };
+                    if !out.contains(&sig) {
+                        out.push(sig);
+                    }
+                }
+            }
+            let cellar = prefix.join("Cellar");
+            if cellar.is_dir() && cellar.join(agent_key).is_dir() {
+                let sig = ManagerSignal::HomebrewFormula {
+                    brew_prefix: prefix.to_path_buf(),
+                    formula: agent_key.to_string(),
+                };
+                if !out.contains(&sig) {
+                    out.push(sig);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn determine_qoder_owner(
@@ -950,23 +1237,51 @@ fn determine_qoder_owner(
     has_native_update_cmd: bool,
     env: &DiscoveryEnv,
 ) -> UpdateOwner {
+    let wrapper_targets = collect_verified_wrapper_targets(launcher_path, resolved_path);
     let mut signals = Vec::new();
     if let Some(npm_sig) = npm_signal {
         signals.push(npm_sig);
     }
     for key in ["qodercli", "qoder"] {
         for brew_sig in detect_homebrew_ownership(launcher_path, resolved_path, version, key, env) {
-            if !signals.contains(&brew_sig) {
-                signals.push(brew_sig);
+            push_unique_manager_signal(&mut signals, brew_sig, env.is_windows);
+        }
+        for (target_path, resolved_target_path) in &wrapper_targets {
+            for brew_sig in
+                detect_homebrew_ownership(target_path, resolved_target_path, version, key, env)
+            {
+                push_unique_manager_signal(&mut signals, brew_sig, env.is_windows);
+            }
+            for brew_sig in
+                detect_homebrew_in_target_prefix(target_path, resolved_target_path, version, key)
+            {
+                push_unique_manager_signal(&mut signals, brew_sig, env.is_windows);
             }
         }
     }
     if let Some(unsupported) =
         detect_unsupported_foreign_manager(launcher_path, resolved_path, false)
     {
-        signals.push(ManagerSignal::UnsupportedManager {
-            manager: unsupported,
-        });
+        push_unique_manager_signal(
+            &mut signals,
+            ManagerSignal::UnsupportedManager {
+                manager: unsupported,
+            },
+            env.is_windows,
+        );
+    }
+    for (target_path, resolved_target_path) in &wrapper_targets {
+        if let Some(unsupported) =
+            detect_unsupported_foreign_manager(target_path, resolved_target_path, false)
+        {
+            push_unique_manager_signal(
+                &mut signals,
+                ManagerSignal::UnsupportedManager {
+                    manager: unsupported,
+                },
+                env.is_windows,
+            );
+        }
     }
 
     if has_contradictory_signals(&signals) {
@@ -1054,10 +1369,23 @@ fn determine_qoder_owner(
     }
 
     if has_ambiguous_or_unverified_qoder_npm_evidence(launcher_path, resolved_path, env.is_windows)
+        || wrapper_targets
+            .iter()
+            .any(|(t, rt)| has_ambiguous_or_unverified_qoder_npm_evidence(t, rt, env.is_windows))
     {
         return UpdateOwner::ManualActionRequired {
             reason: "could not verify npm prefix ownership for Qoder CLI launcher".to_string(),
             guidance: "Ensure the active Qoder CLI wrapper and its '@qoder-ai/qodercli' global package reside in the same npm prefix, or update manually.".to_string(),
+        };
+    }
+
+    if !wrapper_targets.is_empty()
+        || has_unverified_wrapper_forwarding(launcher_path, resolved_path)
+    {
+        return UpdateOwner::ManualActionRequired {
+            reason: "could not verify installation ownership for Qoder CLI wrapper target"
+                .to_string(),
+            guidance: "Update Qoder CLI manually using the package manager or installation method that owns the wrapped target.".to_string(),
         };
     }
 
@@ -2229,6 +2557,13 @@ fn detect_npm_ownership(
         if let Some((prefix, pkg_root)) =
             extract_npm_prefix_from_node_modules(path, &pkg_parts, is_windows)
             && verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
+            && verify_package_json_entrypoint(
+                &pkg_root,
+                launcher_path,
+                path,
+                expected_pkg,
+                is_windows,
+            )
         {
             let clean_prefix = prefer_launcher_prefix(launcher_path, prefix, is_windows);
             return Some(ManagerSignal::Npm {
@@ -2269,21 +2604,30 @@ fn detect_npm_ownership(
                     pkg_root = pkg_root.join(part);
                 }
                 let canon_pkg_root = canonicalize_clean(&pkg_root);
-                if verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version)
-                    && (resolved_path.starts_with(&pkg_root)
-                        || resolved_path.starts_with(&canon_pkg_root)
-                        || launcher_targets_npm_pkg_root(
-                            launcher_path,
-                            &pkg_parts,
-                            &prefix_opt,
+                if verify_package_json_name_and_version(&pkg_root, expected_pkg, active_version) {
+                    let resolved_in_pkg = (resolved_path.starts_with(&pkg_root)
+                        || resolved_path.starts_with(&canon_pkg_root))
+                        && verify_package_json_entrypoint(
                             &pkg_root,
+                            launcher_path,
+                            resolved_path,
+                            expected_pkg,
                             is_windows,
-                        ))
-                {
-                    return Some(ManagerSignal::Npm {
-                        prefix: prefix_opt,
-                        package: expected_pkg.to_string(),
-                    });
+                        );
+                    let wrapper_in_pkg = launcher_targets_npm_pkg_root(
+                        launcher_path,
+                        &pkg_parts,
+                        &prefix_opt,
+                        &pkg_root,
+                        expected_pkg,
+                        is_windows,
+                    );
+                    if resolved_in_pkg || wrapper_in_pkg {
+                        return Some(ManagerSignal::Npm {
+                            prefix: prefix_opt,
+                            package: expected_pkg.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -2373,6 +2717,99 @@ fn verify_package_json_name_and_version(
     true
 }
 
+fn verify_package_json_entrypoint(
+    pkg_root: &Path,
+    launcher_path: &Path,
+    target_in_pkg: &Path,
+    expected_pkg: &str,
+    is_windows: bool,
+) -> bool {
+    let pkg_json_path = pkg_root.join("package.json");
+    let Ok(contents) = fs::read_to_string(pkg_json_path) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    let launcher_stem = launcher_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let target_stem = target_in_pkg
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    if let Some(bin_val) = val.get("bin") {
+        if let Some(bin_obj) = bin_val.as_object() {
+            let Some((_, entry_val)) = bin_obj
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(launcher_stem))
+            else {
+                return false;
+            };
+            let Some(rel_bin) = entry_val.as_str() else {
+                return false;
+            };
+            return target_matches_declared_bin_path(pkg_root, target_in_pkg, rel_bin, is_windows);
+        }
+        if let Some(rel_bin) = bin_val.as_str() {
+            let default_cmd = expected_pkg.rsplit('/').next().unwrap_or(expected_pkg);
+            let declared_path = normalize_lexical_path(&pkg_root.join(rel_bin.replace('\\', "/")));
+            let declared_stem = declared_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            return (launcher_stem.eq_ignore_ascii_case(default_cmd)
+                || launcher_stem.eq_ignore_ascii_case(declared_stem))
+                && target_matches_declared_bin_path(pkg_root, target_in_pkg, rel_bin, is_windows);
+        }
+        return false;
+    }
+
+    if expected_pkg.eq_ignore_ascii_case("@qoder-ai/qodercli") {
+        return launcher_stem.eq_ignore_ascii_case("qodercli")
+            && target_stem.eq_ignore_ascii_case("qodercli");
+    }
+
+    true
+}
+
+fn target_matches_declared_bin_path(
+    pkg_root: &Path,
+    target_in_pkg: &Path,
+    rel_bin: &str,
+    is_windows: bool,
+) -> bool {
+    let clean_rel = rel_bin.replace('\\', "/");
+    let trimmed_rel = clean_rel.strip_prefix("./").unwrap_or(&clean_rel);
+    if trimmed_rel.is_empty() {
+        return false;
+    }
+    let declared = normalize_lexical_path(&pkg_root.join(trimmed_rel));
+    let canon_declared = canonicalize_clean(&declared);
+    let norm_target = normalize_lexical_path(target_in_pkg);
+    let canon_target = canonicalize_clean(target_in_pkg);
+
+    if paths_refer_to_same_dir(&norm_target, &declared, is_windows)
+        || paths_refer_to_same_dir(&canon_target, &canon_declared, is_windows)
+    {
+        return true;
+    }
+
+    if let (Some(target_parent), Some(declared_parent), Some(t_stem), Some(d_stem)) = (
+        norm_target.parent(),
+        declared.parent(),
+        norm_target.file_stem().and_then(|s| s.to_str()),
+        declared.file_stem().and_then(|s| s.to_str()),
+    ) {
+        return paths_refer_to_same_dir(target_parent, declared_parent, is_windows)
+            && t_stem.eq_ignore_ascii_case(d_stem);
+    }
+
+    false
+}
+
 fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
     let pkg_parts: Vec<&str> = expected_pkg.split('/').collect();
     for rel_base in [
@@ -2409,6 +2846,7 @@ fn launcher_targets_npm_pkg_root(
     pkg_parts: &[&str],
     candidate_prefix: &Path,
     candidate_pkg_root: &Path,
+    expected_pkg: &str,
     is_windows: bool,
 ) -> bool {
     let Some(exec_target) = extract_verified_wrapper_exec_target(launcher_path) else {
@@ -2421,6 +2859,13 @@ fn launcher_targets_npm_pkg_root(
     };
     paths_refer_to_same_dir(&target_prefix, candidate_prefix, is_windows)
         && paths_refer_to_same_dir(&target_pkg_root, candidate_pkg_root, is_windows)
+        && verify_package_json_entrypoint(
+            candidate_pkg_root,
+            launcher_path,
+            &exec_target,
+            expected_pkg,
+            is_windows,
+        )
 }
 
 #[derive(Default)]
@@ -2752,6 +3197,55 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     out
 }
 
+fn signals_refer_to_same_owner(a: &ManagerSignal, b: &ManagerSignal, is_windows: bool) -> bool {
+    match (a, b) {
+        (
+            ManagerSignal::Npm {
+                prefix: p1,
+                package: pkg1,
+            },
+            ManagerSignal::Npm {
+                prefix: p2,
+                package: pkg2,
+            },
+        ) => pkg1.eq_ignore_ascii_case(pkg2) && paths_refer_to_same_dir(p1, p2, is_windows),
+        (
+            ManagerSignal::HomebrewCask {
+                brew_prefix: p1,
+                cask_token: c1,
+            },
+            ManagerSignal::HomebrewCask {
+                brew_prefix: p2,
+                cask_token: c2,
+            },
+        ) => c1 == c2 && paths_refer_to_same_dir(p1, p2, is_windows),
+        (
+            ManagerSignal::HomebrewFormula {
+                brew_prefix: p1,
+                formula: f1,
+            },
+            ManagerSignal::HomebrewFormula {
+                brew_prefix: p2,
+                formula: f2,
+            },
+        ) => f1 == f2 && paths_refer_to_same_dir(p1, p2, is_windows),
+        _ => a == b,
+    }
+}
+
+fn push_unique_manager_signal(
+    signals: &mut Vec<ManagerSignal>,
+    candidate: ManagerSignal,
+    is_windows: bool,
+) {
+    if !signals
+        .iter()
+        .any(|existing| signals_refer_to_same_owner(existing, &candidate, is_windows))
+    {
+        signals.push(candidate);
+    }
+}
+
 /// Detects Homebrew Caskroom or Cellar ownership tied to `launcher_path` or `resolved_path`.
 fn detect_homebrew_ownership(
     launcher_path: &Path,
@@ -2769,9 +3263,7 @@ fn detect_homebrew_ownership(
                 brew_prefix: clean_prefix,
                 cask_token,
             };
-            if !out.contains(&sig) {
-                out.push(sig);
-            }
+            push_unique_manager_signal(&mut out, sig, env.is_windows);
         }
         if let Some((brew_prefix, formula)) = extract_homebrew_dir_token(path, "Cellar") {
             let clean_prefix = prefer_launcher_prefix(launcher_path, brew_prefix, env.is_windows);
@@ -2779,9 +3271,7 @@ fn detect_homebrew_ownership(
                 brew_prefix: clean_prefix,
                 formula,
             };
-            if !out.contains(&sig) {
-                out.push(sig);
-            }
+            push_unique_manager_signal(&mut out, sig, env.is_windows);
         }
     }
 
