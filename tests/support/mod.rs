@@ -168,7 +168,10 @@ fn main() -> ExitCode {
 
     if is_help {
         if let Some(out) = cfg.get("help_stdout") {
-            println!("{out}");
+            println!("{}", out.replace("<NL>", "\n"));
+        }
+        if let Some(err) = cfg.get("help_stderr") {
+            eprintln!("{}", err.replace("<NL>", "\n"));
         }
         let code = cfg
             .get("help_exit")
@@ -226,11 +229,37 @@ fn main() -> ExitCode {
         }
     }
 
+    if let (Some(src_err), Some(dst_snap)) = (
+        cfg.get("observe_stderr_file"),
+        cfg.get("observe_stderr_out_file"),
+    ) {
+        if let Ok(existing) = fs::read_to_string(src_err) {
+            let _ = fs::write(dst_snap, existing);
+        }
+    }
+
+    let no_newline = cfg
+        .get("update_no_trailing_newline")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     if let Some(out) = cfg.get("update_stdout") {
-        println!("{out}");
+        let rendered = out.replace("<NL>", "\n");
+        if no_newline {
+            print!("{rendered}");
+            let _ = std::io::stdout().flush();
+        } else {
+            println!("{rendered}");
+        }
     }
     if let Some(err) = cfg.get("update_stderr") {
-        eprintln!("{err}");
+        let rendered = err.replace("<NL>", "\n");
+        if no_newline {
+            eprint!("{rendered}");
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{rendered}");
+        }
     }
     let code = cfg
         .get("update_exit")
@@ -299,7 +328,7 @@ fn update_cfg_version(cfg_path: &Path, next_ver: &str) {
 pub fn compiled_fake_tool_binary() -> &'static Path {
     FAKE_TOOL_BIN.get_or_init(|| {
         let pid = std::process::id();
-        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-v3-{pid}"));
+        let out_dir = std::env::temp_dir().join(format!("teemiao-fake-tool-build-v4-{pid}"));
         fs::create_dir_all(&out_dir).expect("create fake tool build dir");
         let src_path = out_dir.join("fake_tool.rs");
         let bin_name = if cfg!(windows) {
@@ -441,6 +470,45 @@ impl TestSandbox {
         }
 
         cmd.output().expect("spawn teemiao binary")
+    }
+
+    /// Runs the compiled `teemiao` binary with `stderr` redirected directly to `stderr_file`
+    /// so child processes can observe flushed stderr writes before updater completion.
+    pub fn run_teemiao_with_stderr_file(
+        &self,
+        args: &[&str],
+        path_dirs: &[&Path],
+        extra_env: &[(&str, &str)],
+        stderr_file: &Path,
+    ) -> Output {
+        let teemiao_bin = env!("CARGO_BIN_EXE_teemiao");
+        let joined_path = std::env::join_paths(path_dirs).expect("join PATH");
+        let err_handle = fs::File::create(stderr_file).expect("create stderr file");
+        let mut cmd = Command::new(teemiao_bin);
+        cmd.args(args)
+            .env_clear()
+            .env("PATH", joined_path)
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("LOCALAPPDATA", self.home.join("AppData").join("Local"))
+            .env("TEEMIAO_TEST_LOG_FILE", &self.log_file)
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("LANG", "en_US.UTF-8")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(err_handle));
+
+        if cfg!(windows) {
+            if let Some(sys_root) = std::env::var_os("SystemRoot") {
+                cmd.env("SystemRoot", sys_root);
+            }
+            cmd.env("PATHEXT", ".COM;.EXE;.BAT;.CMD;.PS1");
+        }
+
+        for &(k, v) in extra_env {
+            cmd.env(k, v);
+        }
+
+        cmd.output().expect("spawn teemiao binary with stderr file")
     }
 
     /// Reads all recorded fake tool invocations from `invocations.log`.

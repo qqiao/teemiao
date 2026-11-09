@@ -352,6 +352,7 @@ pub fn discover_agent(
 ) -> Option<DiscoveredAgent> {
     match id {
         AgentId::Cursor => discover_cursor(env, runner),
+        AgentId::Qoder => discover_qoder(env, runner),
         _ => {
             for &candidate in id.cli_candidates() {
                 if let Some((launcher_path, resolved_path)) =
@@ -623,6 +624,517 @@ fn is_version_or_build_token(raw_token: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
+/// Discovers Qoder CLI, preferring `qodercli` on `PATH` and falling back to a verified
+/// `qoder` CLI binary while rejecting Qoder Desktop/IDE launchers and unrelated tools.
+fn discover_qoder(env: &DiscoveryEnv, runner: &dyn ProcessRunner) -> Option<DiscoveredAgent> {
+    for &candidate in AgentId::Qoder.cli_candidates() {
+        if let Some((launcher_path, resolved_path)) = resolve_executable_on_path(candidate, env)
+            && let Some(verified) =
+                try_verify_qoder_candidate(candidate, launcher_path, resolved_path, env, runner)
+        {
+            return Some(verified);
+        }
+    }
+    None
+}
+
+fn try_verify_qoder_candidate(
+    candidate: &str,
+    launcher_path: PathBuf,
+    resolved_path: PathBuf,
+    env: &DiscoveryEnv,
+    runner: &dyn ProcessRunner,
+) -> Option<DiscoveredAgent> {
+    let has_local_qoder_cli_evidence = path_has_qoder_cli_evidence(&launcher_path, &resolved_path);
+    if path_has_qoder_desktop_bundle(&launcher_path, &resolved_path)
+        && !has_local_qoder_cli_evidence
+    {
+        return None;
+    }
+
+    let is_dedicated_cli_name = candidate.eq_ignore_ascii_case("qodercli");
+
+    if env.is_windows && is_unsafe_windows_cmd_shim(&launcher_path) {
+        if !is_dedicated_cli_name && !has_local_qoder_cli_evidence {
+            return None;
+        }
+        let warning = t!(
+            "agents.warning.probe_failed",
+            name = AgentId::Qoder.display_name(),
+            path = launcher_path.display(),
+            detail = "unsafe Windows .cmd shim path metacharacters"
+        )
+        .to_string();
+        return Some(DiscoveredAgent {
+            id: AgentId::Qoder,
+            version: None,
+            owner: UpdateOwner::ManualActionRequired {
+                reason: "Windows .cmd path contains unsafe shell metacharacters".to_string(),
+                guidance:
+                    "Reinstall Qoder CLI in a standard directory without cmd.exe metacharacters."
+                        .to_string(),
+            },
+            launcher_path,
+            resolved_path,
+            warnings: vec![warning],
+        });
+    }
+
+    let mut warnings = Vec::new();
+    let probe_result = run_bounded_probe(&launcher_path, &["--version"], runner);
+
+    match probe_result {
+        Ok(version_out) => {
+            let version_text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&version_out.stdout),
+                String::from_utf8_lossy(&version_out.stderr)
+            );
+            if has_qoder_desktop_or_ide_signature(&version_text)
+                || (version_out.success && has_conflicting_non_qoder_product(&version_text))
+            {
+                return None;
+            }
+
+            let version = interpret_version_probe_output(
+                AgentId::Qoder,
+                &launcher_path,
+                &version_out,
+                &mut warnings,
+            );
+
+            let npm_signal = detect_npm_ownership(
+                &launcher_path,
+                &resolved_path,
+                version.as_deref(),
+                "@qoder-ai/qodercli",
+                env.is_windows,
+            );
+
+            let mut help_text: Option<String> = None;
+            if npm_signal.is_none()
+                && !version_out.timed_out
+                && !version_out.stdout_truncated
+                && !version_out.stderr_truncated
+                && version_out.status_code.is_some()
+                && let Ok(help_out) = run_bounded_probe(&launcher_path, &["--help"], runner)
+                && !help_out.timed_out
+                && !help_out.stdout_truncated
+                && !help_out.stderr_truncated
+            {
+                let combined_help = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&help_out.stdout),
+                    String::from_utf8_lossy(&help_out.stderr)
+                );
+                if has_qoder_desktop_or_ide_signature(&combined_help) {
+                    return None;
+                }
+                help_text = Some(combined_help);
+            }
+
+            let is_verified_cli = npm_signal.is_some()
+                || has_local_qoder_cli_evidence
+                || version_has_qoder_cli_branding(&version_text)
+                || help_text
+                    .as_deref()
+                    .is_some_and(help_has_qoder_cli_evidence)
+                || (is_dedicated_cli_name
+                    && (!version_out.success || version_has_qoder_or_bare_version(&version_text)));
+
+            if !is_verified_cli {
+                return None;
+            }
+
+            let has_native_update_cmd = help_text
+                .as_deref()
+                .is_some_and(help_supports_qoder_native_update);
+            let owner = determine_qoder_owner(
+                &launcher_path,
+                &resolved_path,
+                version.as_deref(),
+                npm_signal,
+                has_native_update_cmd,
+                env,
+            );
+
+            Some(DiscoveredAgent {
+                id: AgentId::Qoder,
+                version,
+                launcher_path,
+                resolved_path,
+                owner,
+                warnings,
+            })
+        }
+        Err(err) => {
+            if !is_dedicated_cli_name && !has_local_qoder_cli_evidence {
+                return None;
+            }
+            warnings.push(
+                t!(
+                    "agents.warning.probe_failed",
+                    name = AgentId::Qoder.display_name(),
+                    path = launcher_path.display(),
+                    detail = err.to_string()
+                )
+                .to_string(),
+            );
+            let npm_signal = detect_npm_ownership(
+                &launcher_path,
+                &resolved_path,
+                None,
+                "@qoder-ai/qodercli",
+                env.is_windows,
+            );
+            let owner =
+                determine_qoder_owner(&launcher_path, &resolved_path, None, npm_signal, false, env);
+            Some(DiscoveredAgent {
+                id: AgentId::Qoder,
+                version: None,
+                launcher_path,
+                resolved_path,
+                owner,
+                warnings,
+            })
+        }
+    }
+}
+
+fn path_has_qoder_desktop_bundle(launcher_path: &Path, resolved_path: &Path) -> bool {
+    for path in [launcher_path, resolved_path] {
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if normalized.contains("/qoder.app/") {
+            return true;
+        }
+    }
+    false
+}
+
+fn path_has_qoder_cli_evidence(launcher_path: &Path, resolved_path: &Path) -> bool {
+    for path in [launcher_path, resolved_path] {
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if normalized.contains("/@qoder-ai/qodercli/") || normalized.contains("/.qodercli/") {
+            return true;
+        }
+        if let Some(parent) = path.parent() {
+            for candidate_dir in [Some(parent), parent.parent()].into_iter().flatten() {
+                let pkg_json = candidate_dir.join("package.json");
+                if let Ok(contents) = fs::read_to_string(pkg_json)
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
+                    && let Some(name) = val.get("name").and_then(|n| n.as_str())
+                    && name.eq_ignore_ascii_case("@qoder-ai/qodercli")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn has_qoder_desktop_or_ide_signature(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("qoder desktop")
+        || lower.contains("qoder ide")
+        || lower.contains("qoder editor")
+        || lower.contains("qoder studio")
+        || lower.contains("desktop application")
+        || lower.contains("electron")
+        || lower.contains("--open-window")
+        || lower.contains("--new-window")
+        || lower.contains("--reuse-window")
+}
+
+fn has_conflicting_non_qoder_product(text: &str) -> bool {
+    for raw_token in text.split_whitespace() {
+        if is_version_or_build_token(raw_token) {
+            continue;
+        }
+        for word in raw_token
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| !w.is_empty())
+        {
+            let lower = word.to_ascii_lowercase();
+            if !matches!(
+                lower.as_str(),
+                "qoder"
+                    | "qodercli"
+                    | "ai"
+                    | "cli"
+                    | "agent"
+                    | "coding"
+                    | "code"
+                    | "version"
+                    | "v"
+                    | "release"
+                    | "build"
+                    | "commit"
+                    | "date"
+                    | "darwin"
+                    | "linux"
+                    | "windows"
+                    | "macos"
+                    | "x86"
+                    | "x64"
+                    | "arm64"
+                    | "aarch64"
+                    | "amd64"
+                    | "stable"
+                    | "beta"
+                    | "alpha"
+                    | "rc"
+                    | "nightly"
+                    | "canary"
+                    | "preview"
+                    | "next"
+                    | "dev"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn version_has_qoder_cli_branding(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("qodercli")
+        || lower.contains("qoder cli")
+        || lower.contains("qoder-cli")
+        || lower.contains("@qoder-ai/qodercli")
+}
+
+fn version_has_qoder_or_bare_version(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("qoder") || parse_version_text(text).is_some()
+}
+
+fn help_has_qoder_cli_evidence(help_text: &str) -> bool {
+    let lower = help_text.to_ascii_lowercase();
+    version_has_qoder_cli_branding(&lower)
+        || (lower.contains("qoder") && help_supports_qoder_native_update(&lower))
+}
+
+fn help_supports_qoder_native_update(help_text: &str) -> bool {
+    for raw_line in help_text.lines() {
+        let lower = raw_line.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        if lower.contains("qodercli update") || lower.contains("qoder update") {
+            return true;
+        }
+        let mut tokens = lower.split_whitespace();
+        if let Some(first) = tokens.next() {
+            let cleaned = first.trim_matches(|c: char| matches!(c, ',' | ':' | '|'));
+            if cleaned == "update" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn determine_qoder_owner(
+    launcher_path: &Path,
+    resolved_path: &Path,
+    version: Option<&str>,
+    npm_signal: Option<ManagerSignal>,
+    has_native_update_cmd: bool,
+    env: &DiscoveryEnv,
+) -> UpdateOwner {
+    let mut signals = Vec::new();
+    if let Some(npm_sig) = npm_signal {
+        signals.push(npm_sig);
+    }
+    for key in ["qodercli", "qoder"] {
+        for brew_sig in detect_homebrew_ownership(launcher_path, resolved_path, version, key, env) {
+            if !signals.contains(&brew_sig) {
+                signals.push(brew_sig);
+            }
+        }
+    }
+    if let Some(unsupported) =
+        detect_unsupported_foreign_manager(launcher_path, resolved_path, false)
+    {
+        signals.push(ManagerSignal::UnsupportedManager {
+            manager: unsupported,
+        });
+    }
+
+    if has_contradictory_signals(&signals) {
+        return UpdateOwner::ManualActionRequired {
+            reason: "contradictory ownership metadata detected across multiple installation managers".to_string(),
+            guidance: "Ensure only one package manager or native installation owns the active Qoder CLI binary on PATH.".to_string(),
+        };
+    }
+
+    if let Some(signal) = signals.first() {
+        match signal {
+            ManagerSignal::UnsupportedManager { manager } => {
+                return UpdateOwner::ManualActionRequired {
+                    reason: format!(
+                        "Qoder CLI installation is managed by unsupported manager '{manager}'"
+                    ),
+                    guidance: format!(
+                        "Update Qoder CLI using {manager} directly, or switch to a verified native or npm '@qoder-ai/qodercli' installation."
+                    ),
+                };
+            }
+            ManagerSignal::HomebrewCask { cask_token, .. } => {
+                return UpdateOwner::ManualActionRequired {
+                    reason: format!(
+                        "Qoder CLI is installed via Homebrew cask '{cask_token}', which is not a verified automated update path"
+                    ),
+                    guidance: format!("Update manually with 'brew upgrade --cask {cask_token}'."),
+                };
+            }
+            ManagerSignal::HomebrewFormula { formula, .. } => {
+                return UpdateOwner::ManualActionRequired {
+                    reason: format!(
+                        "Qoder CLI is installed via Homebrew formula '{formula}', which is not a verified automated update path"
+                    ),
+                    guidance: format!("Update manually with 'brew upgrade {formula}'."),
+                };
+            }
+            ManagerSignal::Npm { prefix, package } => {
+                if is_non_default_channel_version(version)
+                    || package_json_has_prerelease(prefix, package)
+                {
+                    return UpdateOwner::ManualActionRequired {
+                        reason: "prerelease npm channel detected; automatic latest upgrade would change release channels".to_string(),
+                        guidance: format!(
+                            "Run 'npm install -g --prefix {} {}@<channel>' manually to preserve your release channel.",
+                            prefix.display(),
+                            package
+                        ),
+                    };
+                }
+                let Some((npm_bin, _)) = resolve_executable_on_path("npm", env) else {
+                    return UpdateOwner::ManualActionRequired {
+                        reason: "active Qoder CLI installation is owned by npm, but 'npm' was not found on PATH".to_string(),
+                        guidance: format!(
+                            "Add npm to PATH and run 'npm install -g --prefix {} {}@latest'.",
+                            prefix.display(),
+                            package
+                        ),
+                    };
+                };
+                if env.is_windows && is_unsafe_windows_cmd_shim(&npm_bin) {
+                    return UpdateOwner::ManualActionRequired {
+                        reason: "npm shim path on Windows contains unsafe shell metacharacters"
+                            .to_string(),
+                        guidance: "Ensure npm is installed in a directory path without cmd.exe metacharacters.".to_string(),
+                    };
+                }
+                return UpdateOwner::NpmGlobal {
+                    npm_program: npm_bin,
+                    prefix: prefix.clone(),
+                    package: package.clone(),
+                };
+            }
+            ManagerSignal::WinGet { package_id } => {
+                return UpdateOwner::ManualActionRequired {
+                    reason: format!(
+                        "WinGet package '{package_id}' is not a verified automated Qoder CLI update path"
+                    ),
+                    guidance: "Update Qoder CLI manually using the method that installed it."
+                        .to_string(),
+                };
+            }
+            ManagerSignal::CodexStandalone { .. } => {}
+        }
+    }
+
+    if has_ambiguous_or_unverified_qoder_npm_evidence(launcher_path, resolved_path, env.is_windows)
+    {
+        return UpdateOwner::ManualActionRequired {
+            reason: "could not verify npm prefix ownership for Qoder CLI launcher".to_string(),
+            guidance: "Ensure the active Qoder CLI wrapper and its '@qoder-ai/qodercli' global package reside in the same npm prefix, or update manually.".to_string(),
+        };
+    }
+
+    if has_native_update_cmd {
+        let bin_name = launcher_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("qodercli");
+        let cmd_label = if bin_name.eq_ignore_ascii_case("qoder") {
+            "qoder update"
+        } else {
+            "qodercli update"
+        };
+        UpdateOwner::NativeSelfUpdate {
+            program: launcher_path.to_path_buf(),
+            args: vec!["update".to_string()],
+            display_command: cmd_label.to_string(),
+        }
+    } else {
+        UpdateOwner::ManualActionRequired {
+            reason: "could not verify native self-update interface or proven npm '@qoder-ai/qodercli' ownership for active Qoder CLI binary".to_string(),
+            guidance: "Update Qoder CLI manually using your original installation method (for example 'qodercli update' or 'npm install -g @qoder-ai/qodercli@latest').".to_string(),
+        }
+    }
+}
+
+fn has_ambiguous_or_unverified_qoder_npm_evidence(
+    launcher_path: &Path,
+    resolved_path: &Path,
+    is_windows: bool,
+) -> bool {
+    for path in [launcher_path, resolved_path] {
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if normalized.contains("/node_modules/") {
+            return true;
+        }
+    }
+    if let Some(sample) = read_text_wrapper_sample(launcher_path) {
+        let lower = sample.to_ascii_lowercase();
+        if lower.contains("node_modules") || lower.contains("@qoder-ai/qodercli") {
+            return true;
+        }
+    }
+    if let Some(bin_dir) = launcher_path.parent() {
+        let candidate_prefixes = if bin_dir
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+        {
+            vec![
+                bin_dir.parent().map(Path::to_path_buf),
+                Some(bin_dir.to_path_buf()),
+            ]
+        } else {
+            vec![Some(bin_dir.to_path_buf())]
+        };
+        for prefix in candidate_prefixes.into_iter().flatten() {
+            let bases = if is_windows {
+                vec![
+                    prefix.join("lib").join("node_modules"),
+                    prefix.join("node_modules"),
+                ]
+            } else {
+                vec![prefix.join("lib").join("node_modules")]
+            };
+            for base in bases {
+                if base.join("@qoder-ai").join("qodercli").exists() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn inspect_candidate(
     id: AgentId,
     launcher_path: PathBuf,
@@ -715,6 +1227,20 @@ fn inspect_candidate(
                 env,
                 runner,
                 cache,
+            ),
+            AgentId::Qoder => determine_qoder_owner(
+                &launcher_path,
+                &resolved_path,
+                version.as_deref(),
+                detect_npm_ownership(
+                    &launcher_path,
+                    &resolved_path,
+                    version.as_deref(),
+                    "@qoder-ai/qodercli",
+                    env.is_windows,
+                ),
+                false,
+                env,
             ),
         }
     };
@@ -1577,8 +2103,8 @@ fn collect_codex_signals(
     resolved_path: &Path,
     active_version: Option<&str>,
     env: &DiscoveryEnv,
-    runner: &dyn ProcessRunner,
-    cache: &mut PackageManagerCache,
+    _runner: &dyn ProcessRunner,
+    _cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut signals = Vec::new();
 
@@ -1592,15 +2118,9 @@ fn collect_codex_signals(
         signals.push(npm_sig);
     }
 
-    for brew_sig in detect_homebrew_ownership(
-        launcher_path,
-        resolved_path,
-        active_version,
-        "codex",
-        env,
-        runner,
-        cache,
-    ) {
+    for brew_sig in
+        detect_homebrew_ownership(launcher_path, resolved_path, active_version, "codex", env)
+    {
         if !signals.contains(&brew_sig) {
             signals.push(brew_sig);
         }
@@ -1628,8 +2148,8 @@ fn collect_claude_signals(
     resolved_path: &Path,
     active_version: Option<&str>,
     env: &DiscoveryEnv,
-    runner: &dyn ProcessRunner,
-    cache: &mut PackageManagerCache,
+    _runner: &dyn ProcessRunner,
+    _cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut signals = Vec::new();
 
@@ -1643,15 +2163,9 @@ fn collect_claude_signals(
         signals.push(npm_sig);
     }
 
-    for brew_sig in detect_homebrew_ownership(
-        launcher_path,
-        resolved_path,
-        active_version,
-        "claude",
-        env,
-        runner,
-        cache,
-    ) {
+    for brew_sig in
+        detect_homebrew_ownership(launcher_path, resolved_path, active_version, "claude", env)
+    {
         if !signals.contains(&brew_sig) {
             signals.push(brew_sig);
         }
@@ -2245,8 +2759,6 @@ fn detect_homebrew_ownership(
     active_version: Option<&str>,
     agent_key: &str,
     env: &DiscoveryEnv,
-    _runner: &dyn ProcessRunner,
-    _cache: &mut PackageManagerCache,
 ) -> Vec<ManagerSignal> {
     let mut out = Vec::new();
 

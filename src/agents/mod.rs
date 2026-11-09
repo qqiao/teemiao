@@ -61,17 +61,22 @@ pub enum AgentId {
     /// Anthropic Claude Code CLI (`claude-code`, alias `claude`).
     #[value(name = "claude-code", alias = "claude")]
     ClaudeCode,
+
+    /// Qoder CLI (`qoder`, alias `qodercli`).
+    #[value(name = "qoder", alias = "qodercli")]
+    Qoder,
 }
 
 impl AgentId {
     /// Complete supported catalog in deterministic order.
-    pub const ALL: [AgentId; 6] = [
+    pub const ALL: [AgentId; 7] = [
         AgentId::Codex,
         AgentId::Antigravity,
         AgentId::OpenCode,
         AgentId::Kimi,
         AgentId::Cursor,
         AgentId::ClaudeCode,
+        AgentId::Qoder,
     ];
 
     /// Canonical identifier used in CLI arguments and output.
@@ -83,6 +88,7 @@ impl AgentId {
             AgentId::Kimi => "kimi",
             AgentId::Cursor => "cursor",
             AgentId::ClaudeCode => "claude-code",
+            AgentId::Qoder => "qoder",
         }
     }
 
@@ -95,6 +101,7 @@ impl AgentId {
             AgentId::Kimi => "Kimi",
             AgentId::Cursor => "Cursor",
             AgentId::ClaudeCode => "Claude Code",
+            AgentId::Qoder => "Qoder",
         }
     }
 
@@ -107,6 +114,7 @@ impl AgentId {
             AgentId::Kimi => &["kimi"],
             AgentId::Cursor => &["agent", "cursor-agent"],
             AgentId::ClaudeCode => &["claude"],
+            AgentId::Qoder => &["qodercli", "qoder"],
         }
     }
 }
@@ -128,8 +136,9 @@ impl FromStr for AgentId {
             "kimi" => Ok(AgentId::Kimi),
             "cursor" => Ok(AgentId::Cursor),
             "claude-code" | "claude" => Ok(AgentId::ClaudeCode),
+            "qoder" | "qodercli" => Ok(AgentId::Qoder),
             other => Err(format!(
-                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, or claude-code/claude)"
+                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude, or qoder/qodercli)"
             )),
         }
     }
@@ -1218,22 +1227,43 @@ fn run_update(
         }
     };
 
-    let mut results: Vec<AgentUpdateResult> = Vec::with_capacity(targets.len());
+    let total = targets.len();
+    let mut results: Vec<AgentUpdateResult> = Vec::with_capacity(total);
     let mut was_interrupted = false;
 
-    for agent in &targets {
+    for (idx, agent) in targets.iter().enumerate() {
         if runner.is_cancelled() {
             was_interrupted = true;
             break;
         }
 
+        if idx > 0 {
+            let _ = writeln!(stderr);
+        }
+        let _ = writeln!(
+            stderr,
+            "{}",
+            t!(
+                "agents.update.section_header",
+                index = idx + 1,
+                total = total,
+                name = agent.id.display_name(),
+                id = agent.id.canonical_id()
+            )
+        );
+        let _ = stderr.flush();
+
         for warning in &agent.warnings {
             let _ = writeln!(stderr, "{warning}");
+        }
+        if !agent.warnings.is_empty() {
+            let _ = stderr.flush();
         }
 
         let res = execute_agent_update(agent, args.dry_run, env, runner, cache);
         let interrupted = res.outcome.is_interrupted();
         emit_update_diagnostics(&res, stderr);
+        let _ = stderr.flush();
         results.push(res);
 
         if interrupted || runner.is_cancelled() {
@@ -1242,9 +1272,13 @@ fn run_update(
         }
     }
 
-    for res in &results {
-        let line = format_update_summary_line(res);
-        let _ = writeln!(stdout, "{line}");
+    if !results.is_empty() {
+        let _ = writeln!(stdout);
+        let _ = writeln!(stdout, "{}", t!("agents.update.summary_header"));
+        for res in &results {
+            let line = format_update_summary_line(res);
+            let _ = writeln!(stdout, "{line}");
+        }
     }
 
     if was_interrupted {
@@ -1619,6 +1653,10 @@ mod tests {
         assert_eq!("claude-code".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
         assert_eq!("claude".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
         assert_eq!("CLAUDE".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
+        assert_eq!("qoder".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("QODER".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("qodercli".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("QoderCli".parse::<AgentId>(), Ok(AgentId::Qoder));
         assert!("unknown-agent".parse::<AgentId>().is_err());
     }
 
@@ -2413,7 +2451,8 @@ mod tests {
         assert_eq!(code, 0);
         assert!(runner_dry.update_calls().is_empty());
         let out_str = String::from_utf8(stdout).unwrap();
-        assert_eq!(out_str.lines().count(), 3);
+        assert!(out_str.starts_with("\nUpdate summary\n"));
+        assert_eq!(out_str.lines().count(), 5);
         assert!(out_str.contains("Antigravity (antigravity): dry-run (would run: agy update"));
         assert!(out_str.contains("OpenCode (opencode): dry-run (would run: opencode upgrade"));
         assert!(out_str.contains("Kimi (kimi): dry-run (would run: kimi upgrade --yes"));
@@ -3847,5 +3886,564 @@ fn main() -> ExitCode {
                 "stderr must report probe failure when job setup fails: {list_err}"
             );
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedRecordingWriter {
+        state: Arc<Mutex<(Vec<u8>, usize)>>,
+    }
+
+    impl SharedRecordingWriter {
+        fn snapshot(&self) -> (String, usize) {
+            let guard = self.state.lock().unwrap();
+            (String::from_utf8_lossy(&guard.0).into_owned(), guard.1)
+        }
+    }
+
+    impl Write for SharedRecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut guard = self.state.lock().unwrap();
+            guard.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut guard = self.state.lock().unwrap();
+            guard.1 += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn update_output_separates_sections_flushes_headers_before_updater_and_localizes_summary() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let bin = home.join(".local").join("bin");
+        create_executable(&bin.join("agy"), "#!/bin/sh\n");
+        create_executable(&bin.join("opencode"), "#!/bin/sh\n");
+        create_executable(&bin.join("kimi"), "#!/bin/sh\n");
+
+        let env = test_env(&[&bin], &home);
+        let shared_stderr = SharedRecordingWriter::default();
+        let stderr_in_runner = shared_stderr.clone();
+        let observed_pre_update: Arc<Mutex<Vec<(String, String, usize)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let observed_clone = Arc::clone(&observed_pre_update);
+
+        let agy_versions = Mutex::new(VecDeque::from(vec![
+            "Antigravity CLI 1.0.0",
+            "Antigravity CLI 1.1.0",
+        ]));
+        let runner = FakeProcessRunner::new(
+            move |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                match name.as_ref() {
+                    "agy" => {
+                        let v = agy_versions
+                            .lock()
+                            .unwrap()
+                            .pop_front()
+                            .unwrap_or("Antigravity CLI 1.1.0");
+                        Ok(ok_output(v))
+                    }
+                    "opencode" => Ok(ok_output("opencode 0.5.0")),
+                    "kimi" => Ok(ok_output("kimi 0.4.0")),
+                    _ => unreachable!(),
+                }
+            },
+            move |req| {
+                let name = req
+                    .program
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let (snap, flushes) = stderr_in_runner.snapshot();
+                observed_clone
+                    .lock()
+                    .unwrap()
+                    .push((name.clone(), snap, flushes));
+
+                match name.as_str() {
+                    "agy" => Ok(ProcessOutput {
+                        status_code: Some(0),
+                        success: true,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"agy step 1\nagy step 2 without newline".to_vec(),
+                        stderr: b"agy warn line 1\nagy warn line 2".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    "opencode" => Ok(ProcessOutput {
+                        status_code: Some(1),
+                        success: false,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"opencode stdout detail".to_vec(),
+                        stderr: b"opencode error line 1\nopencode error line 2".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    "kimi" => Ok(ProcessOutput {
+                        status_code: Some(0),
+                        success: true,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"kimi is already up to date".to_vec(),
+                        stderr: Vec::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    _ => unreachable!(),
+                }
+            },
+        );
+
+        let cmd = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: None,
+                dry_run: false,
+            }),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr_writer = shared_stderr.clone();
+        let code = cmd.run_with_io(&env, &runner, &mut stdout, &mut stderr_writer);
+        assert_eq!(code, 1);
+
+        let observations = observed_pre_update.lock().unwrap().clone();
+        assert_eq!(observations.len(), 3);
+        // 1. Before `agy` updater runs, its header is already written and flushed to stderr.
+        assert_eq!(
+            observations[0].1,
+            "--- [1/3] Antigravity (antigravity) ---\n"
+        );
+        assert!(observations[0].2 >= 1);
+
+        // 2. Before `opencode` updater runs, `agy` diagnostics ended with a newline, followed by a blank line and header 2/3.
+        assert!(
+            observations[1]
+                .1
+                .starts_with("--- [1/3] Antigravity (antigravity) ---\nDiagnostics for Antigravity (antigravity): agy warn line 1\nagy warn line 2\nagy step 1\nagy step 2 without newline\n\n--- [2/3] OpenCode (opencode) ---\n"),
+            "unexpected stderr before opencode updater: {:?}",
+            observations[1].1
+        );
+        assert!(observations[1].2 > observations[0].2);
+
+        // 3. Before `kimi` updater runs, `opencode` failure and multiline diagnostics are confined to section 2/3, followed by a blank line and header 3/3.
+        assert!(
+            observations[2]
+                .1
+                .ends_with("opencode error line 1\nopencode error line 2\nopencode stdout detail\n\n--- [3/3] Kimi (kimi) ---\n"),
+            "unexpected stderr before kimi updater: {:?}",
+            observations[2].1
+        );
+
+        let (final_stderr, _) = shared_stderr.snapshot();
+        assert!(final_stderr.ends_with('\n'));
+        assert!(!final_stderr.contains("Update summary"));
+
+        let final_stdout = String::from_utf8(stdout).unwrap();
+        assert!(
+            final_stdout.starts_with("\nUpdate summary\nAntigravity (antigravity): updated"),
+            "expected leading blank line and 'Update summary' on stdout, got: {final_stdout:?}"
+        );
+        let stdout_lines: Vec<&str> = final_stdout.lines().collect();
+        assert_eq!(stdout_lines[0], "");
+        assert_eq!(stdout_lines[1], "Update summary");
+        assert!(stdout_lines[2].starts_with("Antigravity (antigravity): updated (1.0.0 -> 1.1.0;"));
+        assert!(stdout_lines[3].starts_with("OpenCode (opencode): failed"));
+        assert!(stdout_lines[4].starts_with("Kimi (kimi): up to date (version: 0.4.0;"));
+
+        // Cancellation on agent 1 of 3 must not print headers for agents 2 or 3
+        let runner_cancel = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                Ok(ok_output(&format!("{name} 1.0.0")))
+            },
+            |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(130),
+                    success: false,
+                    interrupted: true,
+                    timed_out: false,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let mut cancel_out = Vec::new();
+        let mut cancel_err = Vec::new();
+        let cancel_code = cmd.run_with_io(&env, &runner_cancel, &mut cancel_out, &mut cancel_err);
+        assert_eq!(cancel_code, 130);
+        let cancel_err_str = String::from_utf8(cancel_err).unwrap();
+        assert!(cancel_err_str.contains("--- [1/3] Antigravity (antigravity) ---"));
+        assert!(!cancel_err_str.contains("--- [2/3]"));
+        assert!(!cancel_err_str.contains("--- [3/3]"));
+
+        // Simplified Chinese locale (`zh-CN`) renders localized summary heading and single-agent dry-run section header
+        rust_i18n::set_locale("zh-CN");
+        let single_dry_cmd = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: Some(AgentId::Antigravity),
+                dry_run: true,
+            }),
+        };
+        let mut zh_out = Vec::new();
+        let mut zh_err = Vec::new();
+        let zh_code = single_dry_cmd.run_with_io(&env, &runner, &mut zh_out, &mut zh_err);
+        rust_i18n::set_locale("en");
+        assert_eq!(zh_code, 0);
+        let zh_err_str = String::from_utf8(zh_err).unwrap();
+        let zh_out_str = String::from_utf8(zh_out).unwrap();
+        assert_eq!(zh_err_str, "--- [1/1] Antigravity (antigravity) ---\n");
+        assert!(
+            zh_out_str.starts_with("\n更新摘要\nAntigravity (antigravity): 演练模式"),
+            "expected zh-CN summary header and dry-run row: {zh_out_str:?}"
+        );
+    }
+
+    #[test]
+    fn qoder_discovery_precedence_desktop_rejection_native_and_npm_ownership() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+
+        // 1. Catalog order places Qoder 7th after Claude Code; `qodercli` is preferred over `qoder`
+        let bin_primary = tmp.path().join("bin-primary");
+        let bin_secondary = tmp.path().join("bin-secondary");
+        create_executable(&bin_primary.join("claude"), "#!/bin/sh\n");
+        create_executable(&bin_primary.join("qoder"), "#!/bin/sh\n");
+        create_executable(&bin_secondary.join("qodercli"), "#!/bin/sh\n");
+        let env_both = test_env(&[&bin_primary, &bin_secondary], &home);
+        let runner_both = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                let is_help = req.args.iter().any(|a| a == "--help");
+                match (name.as_ref(), is_help) {
+                    ("claude", false) => Ok(ok_output("2.1.0 (Claude Code)")),
+                    ("qodercli", false) => Ok(ok_output("qodercli 0.2.1")),
+                    ("qodercli", true) => Ok(ok_output(
+                        "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                    )),
+                    ("qoder", false) => Ok(ok_output("Qoder CLI 0.1.9")),
+                    ("qoder", true) => Ok(ok_output(
+                        "Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+                    )),
+                    _ => unreachable!(),
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache = PackageManagerCache::new();
+        let all = discover_all_agents(&env_both, &runner_both, &mut cache);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, AgentId::ClaudeCode);
+        assert_eq!(all[1].id, AgentId::Qoder);
+        assert_eq!(all[1].launcher_path, bin_secondary.join("qodercli"));
+        assert_eq!(all[1].version.as_deref(), Some("0.2.1"));
+        assert_eq!(
+            all[1].owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: bin_secondary.join("qodercli"),
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+
+        // 2. Fallback to verified `qoder` when `qodercli` is absent or unverified
+        let bin_fallback = tmp.path().join("bin-fallback");
+        create_executable(&bin_fallback.join("qoder"), "#!/bin/sh\n");
+        let env_fallback = test_env(&[&bin_fallback], &home);
+        let runner_fallback = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+                    ))
+                } else {
+                    Ok(ok_output("0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_fb = PackageManagerCache::new();
+        let qoder_fb = discover_agent(
+            AgentId::Qoder,
+            &env_fallback,
+            &runner_fallback,
+            &mut cache_fb,
+        )
+        .unwrap();
+        assert_eq!(qoder_fb.launcher_path, bin_fallback.join("qoder"));
+        assert_eq!(qoder_fb.version.as_deref(), Some("0.2.0"));
+        assert_eq!(
+            qoder_fb.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: bin_fallback.join("qoder"),
+                args: vec!["update".to_string()],
+                display_command: "qoder update".to_string(),
+            }
+        );
+
+        // 3. Reject desktop/IDE `qoder`, bare product/version `qoder` without CLI help/update evidence, and conflicting banners
+        for (ver_out, help_out) in [
+            ("Qoder Desktop 1.2.0", "Usage: qoder --open-window"),
+            ("Qoder IDE 1.2.0", "Qoder IDE"),
+            ("Qoder 1.2.0", "Usage: qoder [file]"),
+            ("1.2.0", ""),
+            ("Datadog Agent 7.50.0", "Datadog agent"),
+            ("Acme Qoder CLI 1.0.0", "Commands:\n  update  Update"),
+        ] {
+            let runner_reject = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(help_out))
+                    } else {
+                        Ok(ok_output(ver_out))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_rej = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_fallback,
+                    &runner_reject,
+                    &mut cache_rej
+                )
+                .is_none(),
+                "expected qoder candidate with version={ver_out:?} help={help_out:?} to be rejected"
+            );
+        }
+
+        // 4. Qoder CLI without `update` interface in `--help` (and not proven npm) is discovered with ManualActionRequired
+        let runner_no_update_cmd = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output("Qoder CLI\nUsage: qoder [options]\n  --help"))
+                } else {
+                    Ok(ok_output("Qoder CLI 0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_manual = PackageManagerCache::new();
+        let qoder_manual = discover_agent(
+            AgentId::Qoder,
+            &env_fallback,
+            &runner_no_update_cmd,
+            &mut cache_manual,
+        )
+        .unwrap();
+        assert!(matches!(
+            qoder_manual.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 5. Proven npm `@qoder-ai/qodercli` ownership (without needing `--help` probe) and missing-npm manual fallback
+        let npm_prefix = tmp.path().join("npm-qoder");
+        let npm_bin = npm_prefix.join("bin");
+        let pkg_dir = npm_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(pkg_dir.join("bin")).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        create_executable(
+            &npm_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pkg_dir.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&npm_bin.join("npm"), "#!/bin/sh\n");
+
+        let env_npm = test_env(&[&npm_bin], &home);
+        let runner_npm = FakeProcessRunner::new(
+            |req| {
+                assert!(
+                    !req.args.iter().any(|a| a == "--help"),
+                    "proven npm @qoder-ai/qodercli should not need a --help probe"
+                );
+                Ok(ok_output("qodercli 0.2.0"))
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_npm = PackageManagerCache::new();
+        let qoder_npm =
+            discover_agent(AgentId::Qoder, &env_npm, &runner_npm, &mut cache_npm).unwrap();
+        assert_eq!(
+            qoder_npm.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: npm_bin.join("npm"),
+                prefix: npm_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // Removing `npm` from PATH must yield ManualActionRequired and never fall back to native self-update
+        fs::remove_file(npm_bin.join("npm")).unwrap();
+        let runner_missing_npm = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                    ))
+                } else {
+                    Ok(ok_output("qodercli 0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_missing_npm = PackageManagerCache::new();
+        let qoder_missing_npm = discover_agent(
+            AgentId::Qoder,
+            &env_npm,
+            &runner_missing_npm,
+            &mut cache_missing_npm,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                qoder_missing_npm.owner,
+                UpdateOwner::ManualActionRequired { .. }
+            ),
+            "npm-owned Qoder without npm on PATH must not fall back to native update: {:?}",
+            qoder_missing_npm.owner
+        );
+
+        // 6. Wrong-prefix wrapper in `stale/bin/qodercli` pointing to `active` must yield ManualActionRequired (neither stale npm nor native update)
+        let stale_prefix = tmp.path().join("npm-qoder-stale");
+        let stale_bin = stale_prefix.join("bin");
+        let stale_pkg_dir = stale_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(&stale_bin).unwrap();
+        fs::create_dir_all(&stale_pkg_dir).unwrap();
+        fs::write(
+            stale_pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        create_executable(
+            &stale_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pkg_dir.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&stale_bin.join("npm"), "#!/bin/sh\n");
+        let env_stale = test_env(&[&stale_bin], &home);
+        let mut cache_stale = PackageManagerCache::new();
+        let qoder_stale = discover_agent(
+            AgentId::Qoder,
+            &env_stale,
+            &runner_missing_npm,
+            &mut cache_stale,
+        )
+        .unwrap();
+        assert!(
+            matches!(qoder_stale.owner, UpdateOwner::ManualActionRequired { .. }),
+            "wrong-prefix wrapper must not authorize stale npm update or native self-update: {:?}",
+            qoder_stale.owner
+        );
+
+        // 7. Unsupported manager (.bun) must yield ManualActionRequired even if --help has `update`
+        let bun_bin = home.join(".bun").join("bin");
+        create_executable(&bun_bin.join("qodercli"), "#!/bin/sh\n");
+        let env_bun = test_env(&[&bun_bin], &home);
+        let mut cache_bun = PackageManagerCache::new();
+        let qoder_bun = discover_agent(
+            AgentId::Qoder,
+            &env_bun,
+            &runner_missing_npm,
+            &mut cache_bun,
+        )
+        .unwrap();
+        assert!(
+            matches!(qoder_bun.owner, UpdateOwner::ManualActionRequired { ref reason, .. } if reason.contains("bun")),
+            "expected bun-managed Qoder to require manual action: {:?}",
+            qoder_bun.owner
+        );
+
+        // 8. Windows .cmd shim discovery: valid npm .cmd shim and unsafe .cmd path metacharacter guard
+        let win_prefix = tmp.path().join("win_npm_qoder");
+        let win_pkg = win_prefix
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(win_pkg.join("bin")).unwrap();
+        fs::write(
+            win_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            win_prefix.join("qodercli.cmd"),
+            "@echo off\r\n\"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\qodercli.exe\" %*\r\n",
+        )
+        .unwrap();
+        fs::write(win_prefix.join("npm.cmd"), "@echo off\r\n").unwrap();
+        let env_win = DiscoveryEnv {
+            path: OsString::from(win_prefix.to_string_lossy().as_ref()),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: None,
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        let mut cache_win = PackageManagerCache::new();
+        let qoder_win =
+            discover_agent(AgentId::Qoder, &env_win, &runner_npm, &mut cache_win).unwrap();
+        assert_eq!(
+            qoder_win.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: win_prefix.join("npm.cmd"),
+                prefix: win_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        let unsafe_win_dir = tmp.path().join("win&unsafe");
+        fs::create_dir_all(&unsafe_win_dir).unwrap();
+        fs::write(unsafe_win_dir.join("qodercli.cmd"), "@echo off\r\n").unwrap();
+        let env_unsafe_win = DiscoveryEnv {
+            path: OsString::from(unsafe_win_dir.to_string_lossy().as_ref()),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home),
+            local_app_data: None,
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        let runner_must_not_run = FakeProcessRunner::new(|_| unreachable!(), |_| unreachable!());
+        let mut cache_unsafe = PackageManagerCache::new();
+        let qoder_unsafe = discover_agent(
+            AgentId::Qoder,
+            &env_unsafe_win,
+            &runner_must_not_run,
+            &mut cache_unsafe,
+        )
+        .unwrap();
+        assert_eq!(qoder_unsafe.version, None);
+        assert!(matches!(
+            qoder_unsafe.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
     }
 }

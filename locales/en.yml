@@ -9,16 +9,16 @@ commands.config_template.about: "Generate configuration from template."
 commands.config_template.long_about: "This command will generate configuration files from templates. (Currently not implemented)"
 
 commands.agents.about: "Discover and update installed AI coding-agent CLIs on PATH."
-commands.agents.long_about: "Discover and update active command-line coding agents (Codex, Antigravity, OpenCode, Kimi, Cursor, and Claude Code) resolved from the current process PATH.\n\nOnly active CLI installations on PATH are inspected; desktop apps and editor extensions are excluded. If an installed agent is missing from the output, add its binary directory to PATH in your shell profile."
+commands.agents.long_about: "Discover and update active command-line coding agents (Codex, Antigravity, OpenCode, Kimi, Cursor, Claude Code, and Qoder) resolved from the current process PATH.\n\nOnly active CLI installations on PATH are inspected; desktop apps and editor extensions are excluded. If an installed agent is missing from the output, add its binary directory to PATH in your shell profile."
 
 commands.agents.list.about: "List installed AI coding-agent CLIs found on PATH."
-commands.agents.list.long_about: "Inspect the current process PATH for supported coding-agent CLIs (codex, agy, opencode, kimi, agent/cursor-agent, claude) and report each detected installation's version, executable path, and update method without performing network update checks."
+commands.agents.list.long_about: "Inspect the current process PATH for supported coding-agent CLIs (codex, agy, opencode, kimi, agent/cursor-agent, claude, qodercli/qoder) and report each detected installation's version, executable path, and update method without performing network update checks."
 
 commands.agents.update.about: "Update one installed coding-agent CLI or all detected coding-agent CLIs."
-commands.agents.update.long_about: "Update a single named coding-agent CLI or every detected coding-agent CLI on PATH using its verified installation owner and existing release channel.\n\nUse --dry-run to preview the selected update command without modifying installed software."
+commands.agents.update.long_about: "Update a single named coding-agent CLI or every detected coding-agent CLI on PATH using its verified installation owner and existing release channel. Each attempted agent's diagnostics are grouped under a '--- [<index>/<total>] <Name> (<id>) ---' section on stderr, followed by a separated 'Update summary' block on stdout.\n\nUse --dry-run to preview the selected update command without modifying installed software."
 
-agents.update.agent.help: "Canonical agent identifier or alias to update (codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude)."
-agents.update.agent.long_help: "Optional agent identifier or alias to update. Supported values: codex, antigravity (alias: agy), opencode, kimi, cursor, claude-code (alias: claude). If omitted, all detected agents on PATH are updated sequentially."
+agents.update.agent.help: "Canonical agent identifier or alias to update (codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude, qoder/qodercli)."
+agents.update.agent.long_help: "Optional agent identifier or alias to update. Supported values: codex, antigravity (alias: agy), opencode, kimi, cursor, claude-code (alias: claude), qoder (alias: qodercli). If omitted, all detected agents on PATH are updated sequentially."
 
 agents.update.dry_run.help: "Preview the update command and target without modifying installed software."
 agents.update.dry_run.long_help: "Run discovery and read-only ownership checks, then print the planned update command for each selected agent without executing updaters or downloading installers."
@@ -42,6 +42,8 @@ agents.warning.probe_unparseable: "Warning: could not parse version for %{name} 
 
 agents.update.empty: "No supported AI coding-agent CLIs were found on PATH; nothing to update."
 agents.update.not_installed: "Error: agent '%{name}' (%{id}) is not installed on PATH. Teemiao only updates existing installations on PATH."
+agents.update.section_header: "--- [%{index}/%{total}] %{name} (%{id}) ---"
+agents.update.summary_header: "Update summary"
 agents.update.dry_run_plan: "%{name} (%{id}): dry-run (would run: %{command}; target: %{target}; current version: %{version})"
 agents.update.dry_run_manual: "%{name} (%{id}): manual action required (%{reason}; guidance: %{guidance})"
 agents.update.outcome.updated: "%{name} (%{id}): updated (%{before} -> %{after}; path: %{path})"

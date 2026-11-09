@@ -3,13 +3,13 @@
 **Issue:** QQ-9. All implementation tasks await T001. Specs and plans are owned
 by the leader; the coder may append completion evidence to this checklist.
 
-- [ ] **T001 — Approve the review package** (Qian Qiao; HumanReviewer).
+- [x] **T001 — Approve the review package** (Qian Qiao; HumanReviewer).
   Review `spec.md`, `plan.md`, this checklist, and the existing CONSTRAINTS.md.
   Acceptance: explicit approval or requested revisions, including Qoder coverage,
   native/npm ownership boundaries, presentation, and `0.2.1` version target.
   Verify: approval recorded on QQ-9 before coder dispatch. Dependency: none.
 
-- [ ] **T002 [US1] — Separate each agent's update output** (Coder; medium).
+- [x] **T002 [US1] — Separate each agent's update output** (Coder; medium).
   Add failing output-order tests, then header/newline/summary rendering at the
   current orchestration boundary with both locale keys. Include dry-run and
   single-agent output; retain final result rows and stderr/stdout split.
@@ -22,7 +22,7 @@ by the leader; the coder may append completion evidence to this checklist.
   `tests/agents_cli.rs`; `tests/support/mod.rs` only if fixtures need extension.
   Dependency: T001. Requirements: FR-001–FR-003.
 
-- [ ] **T003 [US2] — Add Qoder CLI management** (Coder; medium).
+- [x] **T003 [US2] — Add Qoder CLI management** (Coder; medium).
   Use test-driven-development to extend the catalog, alias parsing, discovery,
   verified native/npm ownership, and result matching as one functional slice.
   Acceptance: Qoder lists once after existing agents; targeted/bulk/dry-run
@@ -37,13 +37,13 @@ by the leader; the coder may append completion evidence to this checklist.
   `tests/agents_cli.rs`, optionally `tests/support/mod.rs`.
   Dependency: T002 (shared files). Requirements: FR-004–FR-007.
 
-- [ ] **Checkpoint — Behavior and constraint review** (Coder/Leader).
+- [x] **Checkpoint — Behavior and constraint review** (Coder/Leader).
   Both slices pass focused tests. No changed ownership safeguards, skipped tests,
   new dependencies, probe-limit regressions, or unapproved specification changes.
   Bring uncertain native identity evidence to the leader before proceeding.
   Dependency: T003.
 
-- [ ] **T004 [US3] — Document support and bump the patch version** (Coder; medium).
+- [x] **T004 [US3] — Document support and bump the patch version** (Coder; medium).
   Add Qoder examples/update boundaries and output explanation to README and both
   localized help texts. Change Teemiao to `0.2.1` in manifest/root lock entry.
   Acceptance: documented behavior matches tests; all three version surfaces
@@ -68,3 +68,54 @@ by the leader; the coder may append completion evidence to this checklist.
   Leader requests final review after validating the complete delivery and sets
   parent issue to `in_review`. Address feedback until explicitly accepted.
   Verify: acceptance on QQ-9; `done` stays human-owned. Dependency: T005.
+
+## Implementation & Verification Evidence (T002–T004)
+
+- **Local Environment:** `Darwin 27.2.0 arm64` (macOS), `rustc 1.99.1`, `cargo 1.99.1`.
+- **Commands & Results (local macOS; Linux/Windows covered by cross-platform unit harness & CI):**
+  - `cargo test --locked agents` -> passed (`19` unit tests in `src/agents/mod.rs` + `28` integration tests in `tests/agents_cli.rs`).
+  - `cargo test --locked --test agents_cli` -> passed (`28` process integration tests).
+  - `cargo fmt --check` -> passed (`0` diffs).
+  - `cargo clippy --locked --all-targets -- -D warnings` -> passed (`0` warnings).
+  - `cargo test --locked` -> passed (`39` unit tests + `28` integration tests, `0` failed, `0` ignored).
+  - `cargo build --locked` -> passed.
+  - `cargo run --locked -- --version` -> `teemiao 0.2.1`.
+  - `git diff --check` -> passed (`0` whitespace/formatting errors).
+  - `git diff Cargo.lock` -> only root `teemiao` package version changed from `0.2.0` to `0.2.1`; all dependency versions unchanged.
+- **Fake-Fixture Output Samples:**
+  - `stderr` (multi-agent update with multiline/no-trailing-newline diagnostics):
+    ```text
+    --- [1/2] Antigravity (antigravity) ---
+    Diagnostics for Antigravity (antigravity): agy note line 1
+    agy note line 2
+    Downloading Antigravity 1.1.0
+    Applying update without final newline
+
+    --- [2/2] Kimi (kimi) ---
+    Diagnostics for Kimi (kimi): Upgraded kimi to 0.5.0
+    ```
+  - `stdout` (`en` and `zh-CN` separated summary):
+    ```text
+
+    Update summary
+    Antigravity (antigravity): updated (1.0.0 -> 1.1.0; path: /tmp/.../bin/agy)
+    Kimi (kimi): updated (0.4.0 -> 0.5.0; path: /tmp/.../bin/kimi)
+    ```
+    ```text
+
+    更新摘要
+    Antigravity (antigravity): 演练模式 (将运行: agy update; 目标: /tmp/.../bin/agy; 当前版本: 1.0.0)
+    ```
+  - Qoder discovery & update (`en`):
+    ```text
+    Qoder (qoder) | version: 0.9.1 | path: /tmp/.../bin/qodercli | update: native (qodercli update)
+    ```
+    ```text
+    --- [1/1] Qoder (qoder) ---
+    Diagnostics for Qoder (qoder): Updated Qoder CLI to 0.9.1
+    ```
+    ```text
+
+    Update summary
+    Qoder (qoder): updated (0.9.0 -> 0.9.1; path: /tmp/.../bin/qodercli)
+    ```

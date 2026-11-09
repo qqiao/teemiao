@@ -79,6 +79,19 @@ fn agents_without_subcommand_displays_help_and_exits_2() {
         "expected 'update' in help output: {combined}"
     );
     assert!(sb.invocations().is_empty());
+
+    let ver_out = sb.run_teemiao(&["--version"], &[&sb.bin_dir], &[]);
+    assert_eq!(ver_out.status.code(), Some(0));
+    let ver_stdout = String::from_utf8_lossy(&ver_out.stdout);
+    assert_eq!(ver_stdout.trim(), "teemiao 0.2.1");
+
+    let update_help = sb.run_teemiao(&["agents", "update", "--help"], &[&sb.bin_dir], &[]);
+    assert_eq!(update_help.status.code(), Some(0));
+    let help_stdout = String::from_utf8_lossy(&update_help.stdout);
+    assert!(
+        help_stdout.contains("qoder") && help_stdout.contains("qodercli"),
+        "expected qoder/qodercli in agents update --help: {help_stdout}"
+    );
 }
 
 #[test]
@@ -1981,4 +1994,375 @@ fn agents_npm_wrapper_rejects_other_prefix_target_and_generic_node_comment() {
             "Windows .cmd wrapper with reassigned dp0 must not authorize updating stale prefix: {stdout_dp0}"
         );
     }
+}
+
+#[test]
+fn agents_update_separates_multiline_and_no_newline_sections_flushes_header_before_updater_and_localizes_summary()
+ {
+    let sb = TestSandbox::new();
+    let stderr_file = sb.root.join("live_stderr.log");
+    let agy_snap_file = sb.root.join("agy_observed_stderr.txt");
+    let kimi_snap_file = sb.root.join("kimi_observed_stderr.txt");
+
+    sb.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("next_version_stdout", "Antigravity 1.1.0"),
+            (
+                "update_stdout",
+                "Downloading Antigravity 1.1.0<NL>Applying update without final newline",
+            ),
+            ("update_stderr", "agy note line 1<NL>agy note line 2"),
+            ("update_no_trailing_newline", "1"),
+            ("observe_stderr_file", &stderr_file.to_string_lossy()),
+            ("observe_stderr_out_file", &agy_snap_file.to_string_lossy()),
+        ],
+    );
+    sb.install_fake_tool(
+        "kimi",
+        &[
+            ("version_stdout", "kimi 0.4.0"),
+            ("next_version_stdout", "kimi 0.5.0"),
+            ("update_stdout", "Upgraded kimi to 0.5.0"),
+            ("observe_stderr_file", &stderr_file.to_string_lossy()),
+            ("observe_stderr_out_file", &kimi_snap_file.to_string_lossy()),
+        ],
+    );
+
+    let out =
+        sb.run_teemiao_with_stderr_file(&["agents", "update"], &[&sb.bin_dir], &[], &stderr_file);
+    assert_eq!(out.status.code(), Some(0));
+
+    let agy_observed = fs::read_to_string(&agy_snap_file).expect("agy observed stderr snapshot");
+    assert_eq!(
+        agy_observed, "--- [1/2] Antigravity (antigravity) ---\n",
+        "section header [1/2] must be flushed to stderr before agy updater executes"
+    );
+
+    let kimi_observed = fs::read_to_string(&kimi_snap_file).expect("kimi observed stderr snapshot");
+    assert!(
+        kimi_observed.starts_with("--- [1/2] Antigravity (antigravity) ---\nDiagnostics for Antigravity (antigravity): agy note line 1\nagy note line 2\nDownloading Antigravity 1.1.0\nApplying update without final newline\n\n--- [2/2] Kimi (kimi) ---\n"),
+        "section [1/2] multiline/no-newline diagnostics must finish with a newline and blank line before section [2/2] header is flushed: {kimi_observed:?}"
+    );
+
+    let final_stderr = fs::read_to_string(&stderr_file).expect("read final stderr");
+    assert!(final_stderr.ends_with('\n'));
+    assert!(!final_stderr.contains("Update summary"));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("\nUpdate summary\nAntigravity (antigravity): updated (1.0.0 -> 1.1.0;"),
+        "expected separated Update summary on stdout, got: {stdout:?}"
+    );
+    assert!(stdout.contains("\nKimi (kimi): updated (0.4.0 -> 0.5.0;"));
+
+    // Verify zh-CN localization for section header and summary heading
+    let out_zh = sb.run_teemiao(
+        &["agents", "update", "agy", "--dry-run"],
+        &[&sb.bin_dir],
+        &[("LC_ALL", "zh_CN.UTF-8"), ("LANG", "zh_CN.UTF-8")],
+    );
+    assert_eq!(out_zh.status.code(), Some(0));
+    let stderr_zh = String::from_utf8_lossy(&out_zh.stderr);
+    let stdout_zh = String::from_utf8_lossy(&out_zh.stdout);
+    assert_eq!(stderr_zh, "--- [1/1] Antigravity (antigravity) ---\n");
+    assert!(
+        stdout_zh.starts_with("\n更新摘要\nAntigravity (antigravity): 演练模式"),
+        "expected zh-CN summary heading on stdout: {stdout_zh:?}"
+    );
+}
+
+#[test]
+fn agents_qoder_catalog_order_discovery_precedence_desktop_rejection_and_unknown_version() {
+    let sb = TestSandbox::new();
+    setup_codex_standalone(&sb, "0.118.0");
+    sb.install_fake_tool("agy", &[("version_stdout", "Antigravity CLI 1.4.2")]);
+    sb.install_fake_tool("opencode", &[("version_stdout", "opencode v0.6.1")]);
+    sb.install_fake_tool("kimi", &[("version_stdout", "kimi, version 0.5.3")]);
+    sb.install_fake_tool("agent", &[("version_stdout", "Cursor Agent CLI 0.48.0")]);
+    sb.install_fake_tool("claude", &[("version_stdout", "2.1.4 (Claude Code)")]);
+    sb.install_fake_tool(
+        "qodercli",
+        &[
+            ("version_stdout", "qodercli 0.9.1"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+        ],
+    );
+    sb.install_fake_tool(
+        "qoder",
+        &[
+            ("version_stdout", "Qoder CLI 0.8.0"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+        ],
+    );
+
+    let out = sb.run_teemiao(&["agents", "list"], &[&sb.bin_dir], &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let claude_pos = stdout
+        .find("Claude Code (claude-code)")
+        .expect("Claude Code in output");
+    let qoder_pos = stdout.find("Qoder (qoder)").expect("Qoder in output");
+    assert!(
+        claude_pos < qoder_pos,
+        "Qoder must appear after Claude Code in catalog order: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("Qoder (qoder)").count(),
+        1,
+        "Qoder must only be listed once when both qodercli and qoder exist on PATH: {stdout}"
+    );
+    assert!(
+        stdout.contains("0.9.1"),
+        "qodercli must take precedence over qoder: {stdout}"
+    );
+    assert!(
+        !stdout.contains("0.8.0"),
+        "shadowed qoder version must not be listed: {stdout}"
+    );
+    assert!(stdout.contains("qodercli update"));
+
+    // Fallback to verified `qoder` when `qodercli` is desktop/unverified, plus rejecting bare/desktop `qoder`
+    let sb_fallback = TestSandbox::new();
+    sb_fallback.install_fake_tool(
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder Desktop 2.0.0"),
+            ("help_stdout", "Qoder Desktop IDE --new-window"),
+        ],
+    );
+    sb_fallback.install_fake_tool(
+        "qoder",
+        &[
+            ("version_stdout", "Qoder 0.8.4"),
+            (
+                "help_stdout",
+                "Qoder CLI coding agent<NL>Commands:<NL>  update  Self-update Qoder CLI",
+            ),
+        ],
+    );
+    let out_fb = sb_fallback.run_teemiao(&["agents", "list"], &[&sb_fallback.bin_dir], &[]);
+    assert_eq!(out_fb.status.code(), Some(0));
+    let stdout_fb = String::from_utf8_lossy(&out_fb.stdout);
+    assert!(stdout_fb.contains("Qoder (qoder) | version: 0.8.4"));
+    assert!(stdout_fb.contains("qoder update"));
+
+    // Desktop / bare `qoder` without positive CLI evidence is rejected
+    let sb_reject = TestSandbox::new();
+    sb_reject.install_fake_tool(
+        "qoder",
+        &[
+            ("version_stdout", "Qoder 2.0.0"),
+            ("help_stdout", "Usage: qoder [file]"),
+        ],
+    );
+    let out_rej = sb_reject.run_teemiao(&["agents", "list"], &[&sb_reject.bin_dir], &[]);
+    assert_eq!(out_rej.status.code(), Some(0));
+    let stdout_rej = String::from_utf8_lossy(&out_rej.stdout);
+    assert!(
+        stdout_rej.contains("No supported AI coding-agent CLIs were found on PATH."),
+        "bare product/version qoder without CLI evidence must be rejected: {stdout_rej}"
+    );
+
+    // Absent Qoder targeted update fails cleanly without section header or summary header
+    let out_absent = sb_reject.run_teemiao(
+        &["agents", "update", "qodercli"],
+        &[&sb_reject.bin_dir],
+        &[],
+    );
+    assert_eq!(out_absent.status.code(), Some(1));
+    let stderr_absent = String::from_utf8_lossy(&out_absent.stderr);
+    let stdout_absent = String::from_utf8_lossy(&out_absent.stdout);
+    assert!(stderr_absent.contains("Error: agent 'Qoder' (qoder) is not installed on PATH."));
+    assert!(!stderr_absent.contains("--- ["));
+    assert!(stdout_absent.is_empty());
+
+    // Unknown version warning when `qodercli --version` exits non-zero
+    let sb_unknown = TestSandbox::new();
+    sb_unknown.install_fake_tool(
+        "qodercli",
+        &[
+            ("version_exit", "2"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+        ],
+    );
+    let out_unk = sb_unknown.run_teemiao(&["agents", "list"], &[&sb_unknown.bin_dir], &[]);
+    assert_eq!(out_unk.status.code(), Some(0));
+    let stdout_unk = String::from_utf8_lossy(&out_unk.stdout);
+    let stderr_unk = String::from_utf8_lossy(&out_unk.stderr);
+    assert!(stdout_unk.contains("Qoder (qoder) | version: unknown"));
+    assert!(stderr_unk.contains("Warning: version probe for Qoder"));
+}
+
+#[test]
+fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards() {
+    // 1. Verified native `qodercli` dry-run and real update via both `qoder` and `qodercli` identifiers
+    let sb = TestSandbox::new();
+    sb.install_fake_tool(
+        "qodercli",
+        &[
+            ("version_stdout", "qodercli 0.9.0"),
+            ("next_version_stdout", "qodercli 0.9.1"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+            ("update_stdout", "Updated Qoder CLI to 0.9.1"),
+        ],
+    );
+
+    let out_dry = sb.run_teemiao(
+        &["agents", "update", "qodercli", "--dry-run"],
+        &[&sb.bin_dir],
+        &[],
+    );
+    assert_eq!(out_dry.status.code(), Some(0));
+    assert!(
+        !sb.invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=qodercli|ARGS=update|")),
+        "dry-run must not invoke qodercli update"
+    );
+    let stdout_dry = String::from_utf8_lossy(&out_dry.stdout);
+    assert!(
+        stdout_dry.contains("Qoder (qoder): dry-run (would run: qodercli update;"),
+        "expected Qoder dry-run plan: {stdout_dry}"
+    );
+    assert!(stdout_dry.contains("current version: 0.9.0)"));
+
+    let out_up = sb.run_teemiao(&["agents", "update", "qoder"], &[&sb.bin_dir], &[]);
+    assert_eq!(out_up.status.code(), Some(0));
+    let stdout_up = String::from_utf8_lossy(&out_up.stdout);
+    assert!(
+        stdout_up.contains("Qoder (qoder): updated (0.9.0 -> 0.9.1; path:"),
+        "expected Qoder native update transition: {stdout_up}"
+    );
+
+    // 2. Unchanged version with negated / foreign / non-confirming output -> unverified (exit 1),
+    // and partial failure in multi-agent batch continues to remaining agents
+    let sb_unv = TestSandbox::new();
+    sb_unv.install_fake_tool(
+        "qoder",
+        &[
+            ("version_stdout", "Qoder CLI 0.9.1"),
+            ("next_version_stdout", "Qoder CLI 0.9.1"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+            ("update_stdout", "Qoder CLI is not up to date"),
+        ],
+    );
+    sb_unv.install_fake_tool(
+        "agy",
+        &[
+            ("version_stdout", "Antigravity 1.0.0"),
+            ("next_version_stdout", "Antigravity 1.1.0"),
+            ("update_stdout", "Updated Antigravity to 1.1.0"),
+        ],
+    );
+    let out_batch = sb_unv.run_teemiao(&["agents", "update"], &[&sb_unv.bin_dir], &[]);
+    assert_eq!(out_batch.status.code(), Some(1));
+    let stdout_batch = String::from_utf8_lossy(&out_batch.stdout);
+    let stderr_batch = String::from_utf8_lossy(&out_batch.stderr);
+    assert!(stderr_batch.contains("--- [1/2] Antigravity (antigravity) ---"));
+    assert!(stderr_batch.contains("--- [2/2] Qoder (qoder) ---"));
+    assert!(stdout_batch.contains("Antigravity (antigravity): updated (1.0.0 -> 1.1.0;"));
+    assert!(stdout_batch.contains("Qoder (qoder): unverified"));
+
+    // 3. Proven npm `@qoder-ai/qodercli` update, wrong-prefix wrapper rejection, and missing npm
+    let sb_npm = TestSandbox::new();
+    let npm_prefix = sb_npm.root.join("npm_global");
+    let npm_bin = npm_prefix.join("bin");
+    let pkg_dir = npm_prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@qoder-ai")
+        .join("qodercli");
+    let pkg_bin = pkg_dir.join("bin");
+    fs::create_dir_all(&npm_bin).unwrap();
+    fs::create_dir_all(&pkg_bin).unwrap();
+    fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"@qoder-ai/qodercli","version":"0.9.0"}"#,
+    )
+    .unwrap();
+
+    let (real_qodercli, qodercli_cfg) = sb_npm.install_fake_tool_in(
+        &pkg_bin,
+        "qodercli",
+        &[
+            ("version_stdout", "0.9.0"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+        ],
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&real_qodercli, npm_bin.join("qodercli")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            npm_bin.join("qodercli.cmd"),
+            format!(
+                "@echo off\r\n\"%~dp0\\..\\lib\\node_modules\\@qoder-ai\\qodercli\\bin\\qodercli.exe\" %*\r\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    // Missing `npm` on PATH must require manual action and NEVER fall back to native `qodercli update`
+    let out_no_npm = sb_npm.run_teemiao(&["agents", "update", "qoder"], &[&npm_bin], &[]);
+    assert_eq!(out_no_npm.status.code(), Some(1));
+    let stdout_no_npm = String::from_utf8_lossy(&out_no_npm.stdout);
+    assert!(
+        stdout_no_npm.contains("manual action required"),
+        "npm-owned Qoder without npm on PATH must require manual action: {stdout_no_npm}"
+    );
+    assert!(
+        !sb_npm
+            .invocations()
+            .iter()
+            .any(|l| l.starts_with("TOOL=qodercli|ARGS=update|")),
+        "missing npm must never fall back to native qodercli update"
+    );
+
+    // Install fake `npm` in `npm_bin` and verify proven npm update
+    sb_npm.install_fake_tool_in(
+        &npm_bin,
+        "npm",
+        &[
+            ("next_version_stdout", "0.9.2"),
+            ("target_cfg_path", &qodercli_cfg.to_string_lossy()),
+            ("update_stdout", "added 1 package"),
+        ],
+    );
+    let out_npm_up = sb_npm.run_teemiao(&["agents", "update", "qoder"], &[&npm_bin], &[]);
+    assert_eq!(out_npm_up.status.code(), Some(0));
+    let stdout_npm_up = String::from_utf8_lossy(&out_npm_up.stdout);
+    assert!(
+        stdout_npm_up.contains("Qoder (qoder): updated (0.9.0 -> 0.9.2; path:"),
+        "expected proven npm global update for Qoder: {stdout_npm_up}"
+    );
+    assert!(
+        sb_npm
+            .invocations()
+            .iter()
+            .any(|l| l.contains("TOOL=npm|") && l.contains("@qoder-ai/qodercli@latest")),
+        "expected npm install -g --prefix <prefix> @qoder-ai/qodercli@latest invocation"
+    );
 }

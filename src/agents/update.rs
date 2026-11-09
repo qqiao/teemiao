@@ -1049,6 +1049,13 @@ fn agent_subject_aliases(agent_id: AgentId) -> &'static [&'static str] {
             "claude cli",
             "@anthropic-ai/claude-code",
         ],
+        AgentId::Qoder => &[
+            "qoder",
+            "qoder cli",
+            "qoder-cli",
+            "qodercli",
+            "@qoder-ai/qodercli",
+        ],
     }
 }
 

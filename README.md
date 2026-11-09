@@ -28,7 +28,11 @@ or unowned installations:
   verified update method without performing network update checks.
 - **`teemiao agents update [AGENT] [--dry-run]`** — Updates one specified agent
   (or every detected agent sequentially when `AGENT` is omitted) using the
-  verified installation owner and preserving the active release channel.
+  verified installation owner and preserving the active release channel. Each
+  attempted agent's diagnostics are grouped under a
+  `--- [<index>/<total>] <Name> (<id>) ---` header flushed to `stderr` before the
+  updater runs, and final per-agent outcomes are printed under a separated
+  `Update summary` (`更新摘要` in `zh-CN`) heading on `stdout`.
 
 #### Supported Agents and Update Methods
 
@@ -40,14 +44,17 @@ or unowned installations:
 | Kimi | `kimi` | — | `kimi` | `kimi upgrade --yes` |
 | Cursor | `cursor` | — | `agent` (verified Cursor identity), `cursor-agent` | `agent update` or `cursor-agent update` |
 | Claude Code | `claude-code` | `claude` | `claude` | `claude update` (native), `npm install -g --prefix <prefix> @anthropic-ai/claude-code@latest`, `brew upgrade --cask <cask-token>`, or `winget upgrade --exact --id Anthropic.ClaudeCode ...` |
+| Qoder | `qoder` | `qodercli` | `qodercli`, `qoder` (verified Qoder CLI identity) | `qodercli update` / `qoder update` (verified native CLI) or `npm install -g --prefix <prefix> @qoder-ai/qodercli@latest` |
 
 #### Discovery and Safety Boundaries
 
 - **`PATH`-only active CLI discovery:** Only runnable executables on the current
-  process `PATH` are inspected. Desktop applications (`cursor`, `antigravity`)
-  and editor extensions are never probed or launched. Generic `agent` binaries on
-  `PATH` must pass Cursor CLI identity/metadata verification before being
-  classified as Cursor.
+  process `PATH` are inspected. Desktop applications (`cursor`, `antigravity`,
+  `Qoder Desktop` / `Qoder IDE`) and editor extensions are never launched as
+  managed CLIs. Generic `agent` binaries on `PATH` must pass Cursor CLI
+  identity/metadata verification before being classified as Cursor, and Qoder
+  prefers `qodercli` before falling back to a `qoder` binary that provides
+  corroborating Qoder CLI evidence beyond a bare product/version string.
 - **No implicit new installations:** Updating an absent tool exits with code `1`
   and never installs a new agent. Bulk updates (`teemiao agents update`) only act
   on agents currently discovered on `PATH`.
@@ -57,7 +64,14 @@ or unowned installations:
   `apt`/`dnf`/`pacman`, `pnpm`, `bun`, `scoop`, `choco`, or `nix`), ambiguous
   multi-manager installations, legacy migrations, or pinned/prerelease channels
   that cannot be preserved automatically are reported as `manual action required`
-  with actionable guidance.
+  with actionable guidance (never executing vendor installer scripts for Qoder or
+  migrating an npm-owned installation to native self-update).
+- **Separated per-agent update output:** During `teemiao agents update`, each
+  attempted agent's section header (`--- [<index>/<total>] <Name> (<id>) ---`) is
+  flushed to `stderr` before any probe warnings or updater output, blank lines
+  separate consecutive agent sections, and `stdout` prints a separated
+  `Update summary` (`更新摘要`) heading followed by one outcome row per attempted
+  agent.
 - **Bounded probes:** Version/identity probes run with `CI=1` and
   `DISABLE_AUTOUPDATER=1`, a 5-second timeout, and a 64 KiB per-stream output cap
   so hung or noisy tools do not block discovery of other agents.
@@ -97,6 +111,7 @@ Preview planned update commands without modifying installed software:
 ```bash
 teemiao agents update --dry-run
 teemiao agents update codex --dry-run
+teemiao agents update qoder --dry-run
 ```
 
 Update a single coding-agent CLI (by canonical ID or alias) or all detected
@@ -106,6 +121,8 @@ coding-agent CLIs on `PATH`:
 teemiao agents update antigravity
 teemiao agents update agy
 teemiao agents update claude
+teemiao agents update qoder
+teemiao agents update qodercli
 teemiao agents update
 ```
 
