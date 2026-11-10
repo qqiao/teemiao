@@ -148,3 +148,22 @@ T007 human acceptance; no merge, release tag, or publication was performed.
   - `PRRT_kwDOM79GKM610V2M` (`docs/agents.md:55` & `README.md:46`, comment `4528240653`): Fixed by distinguishing positive ownership/package/help proof for package-managed and multi-method paths (`codex`, `claude-code`, `qoder`) from dedicated native self-updating CLIs (`agy`, `opencode`, `kimi`, and identity-verified `cursor`) that exclude foreign-manager and legacy markers.
   - `PRRT_kwDOM79GKM610V2h` (`docs/agents.md:171`, comment `4528240695`): Already fixed in `664e4e359933c649725f2fac8ebfb6fddb046d2f` and expanded with a note that a project-local `node_modules/.bin` entry earlier on `PATH` can shadow a global installation during bulk `teemiao agents update`.
   - `PRRT_kwDOM79GKM610V3A` (`docs/cli.md:92`, comment `4528240754`): Fixed by updating `docs/cli.md:92` so CI/build workarounds remove any pre-existing target file (or write to a fresh path) before running `teemiao build-info` and validate both the newly written JSON and `stderr`.
+
+## Independent Copilot follow-up review (2026-11-11)
+
+Reviewed `878b8eabe0f89b4e7bc47e4b5728afc6d9965ffc` and confirmed all four
+GitHub conversations were resolved. The ownership refinement still generalized
+npm/Homebrew rejection across all native updaters. Corrected README, the agent
+guide, and audit evidence: Antigravity/Cursor reject those paths; OpenCode/Kimi
+allow them and apply their own legacy checks. Scoped the local npm shadowing
+example to Codex rather than asserting every agent rejects a local launcher.
+The stale-build-info guidance and baseline-heading disposition are accepted.
+
+Independent disposable checks passed for stale JSON after both non-repository
+and unborn-HEAD errors, failure detection with fresh output paths, successful
+JSON generation, a supported global Codex shadowed by project-local Codex, and
+native update selection for Antigravity/OpenCode/Kimi with npm/Homebrew paths.
+`cargo build --locked` and diff hygiene passed. All 14 baseline README headings
+remain. Runtime source, locales, tests, manifests, and constraints are unchanged
+from the independently validated implementation; the prior 39-unit/28-integration
+test and strict-Clippy results remain applicable. T007 human acceptance is open.

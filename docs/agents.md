@@ -55,7 +55,7 @@ Agents are always listed and updated in this deterministic catalog order:
 Teemiao never guesses a package-manager owner from the mere presence of `npm`, `brew`, or `winget` on `PATH`:
 
 - **Package-managed and multi-method agents (`codex`, `claude-code`, `qoder`):** Package-managed update plans (`npm`, `Homebrew`, `WinGet`), Codex standalone installer plans, Claude Code native updates, and Qoder native updates require positive proof from the active launcher path, its symlink-resolved target, verified wrapper script bindings, local package metadata, or `--help` output.
-- **Dedicated native self-updating CLIs (`antigravity`/`agy`, `opencode`, `kimi`, and identity-verified `cursor`):** Select their native self-update subcommand only after verifying CLI identity (where required) and excluding foreign/system package-manager paths (`node_modules`, Homebrew `Caskroom`/`Cellar`, system `/usr/bin`, etc.), legacy installation markers, and unsafe Windows `.cmd` shims.
+- **Dedicated native self-updating CLIs (`antigravity`/`agy`, `opencode`, `kimi`, and identity-verified `cursor`):** Select their native self-update subcommand using agent-specific foreign/system-manager checks and reject unsafe Windows `.cmd` shims. Antigravity and Cursor reject npm (`node_modules`) and Homebrew (`Caskroom`/`Cellar`) paths. OpenCode and Kimi allow those paths and delegate updates to their own CLI; they additionally check for known legacy installation markers. These native paths do not require universal package-ownership proof.
 
 ### Per-Agent Ownership Matrix
 
@@ -73,10 +73,10 @@ Teemiao never guesses a package-manager owner from the mere presence of `npm`, `
    - Uses native `agy update` unless the binary resides under npm (`node_modules`), Homebrew (`Caskroom`/`Cellar`), or another foreign/system package manager, which reports `manual action required`.
 
 3. **OpenCode (`opencode`)**
-   - Uses native `opencode upgrade` unless legacy markers are detected (`legacy` in probe/version output or an adjacent `.opencode-legacy` file) or the binary is owned by a foreign/system package manager. Never passes automatic cross-generation migration flags.
+   - Uses native `opencode upgrade` unless legacy markers are detected (`legacy` in probe/version output or an adjacent `.opencode-legacy` file) or an unsupported foreign/system-manager path is detected. npm and Homebrew paths are allowed and delegated to OpenCode's updater. Never passes automatic cross-generation migration flags.
 
 4. **Kimi (`kimi`)**
-   - Uses native `kimi upgrade --yes` unless legacy markers are detected (`legacy` in probe/version output, an adjacent `.kimi-legacy` file, or wrapper scripts containing `kimi-legacy` or `no-self-upgrade`) or a foreign/system package manager owns the path.
+   - Uses native `kimi upgrade --yes` unless legacy markers are detected (`legacy` in probe/version output, an adjacent `.kimi-legacy` file, or wrapper scripts containing `kimi-legacy` or `no-self-upgrade`) or an unsupported foreign/system-manager path is detected. npm and Homebrew paths are allowed and delegated to Kimi's updater.
    - If `kimi upgrade --yes` prints manual upgrade instructions (such as `run uv tool upgrade` or `run pip install`), Teemiao classifies the outcome as `manual action required` even if the child exited with code `0`.
 
 5. **Cursor (`cursor`)**
@@ -108,7 +108,7 @@ Teemiao distinguishes between tools that are **absent** from `PATH` and installa
 | Situation | `teemiao agents list` | `teemiao agents update` (bulk) | `teemiao agents update <agent>` (targeted) |
 |---|---|---|---|
 | **Absent tool** (not on `PATH`, non-executable file, broken symlink, desktop launcher, or unverified generic `agent`/`qoder` binary) | Omitted from output; exits `0`. | Skipped; never installed; does not cause failure. | Prints `Error: agent '<Name>' (<id>) is not installed on PATH. Teemiao only updates existing installations on PATH.` to `stderr` and exits `1`. |
-| **Unsupported or ambiguous installation** (detected on `PATH`, e.g., project-local `node_modules/.bin` launchers, installations owned by `pnpm`/`bun`/`yarn`/`nix`/`snap`/`flatpak`/`scoop`/`chocolatey`/system `/usr/bin`, prerelease channel, legacy Kimi/OpenCode, or unproven owner) | Listed on `stdout` with `update: manual action required (<reason>)`; exits `0`. | Included in the sequence; prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary; continues to remaining agents and exits `1`. | Prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary without running an updater; exits `1`. |
+| **Unsupported or ambiguous installation** (detected on `PATH`, e.g., project-local Codex `node_modules/.bin` launchers, installations owned by `pnpm`/`bun`/`yarn`/`nix`/`snap`/`flatpak`/`scoop`/`chocolatey`/system `/usr/bin`, or an unsupported channel, legacy installation, or unproven owner under the per-agent rules above) | Listed on `stdout` with `update: manual action required (<reason>)`; exits `0`. | Included in the sequence; prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary; continues to remaining agents and exits `1`. | Prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary without running an updater; exits `1`. |
 
 ## Output Streams and Formatting
 
@@ -175,7 +175,7 @@ Every discovery, version, help, and package-manager inventory probe runs through
 - **`manual action required` reported for an npm, Homebrew, or standalone installation:**
   - Check the `reason` and `guidance` printed on `stderr` and under `Update summary`.
   - Common causes include:
-    - The active binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists project-local `node_modules/.bin` executables on `PATH` with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects them as global npm installs so `teemiao agents update [<agent>] [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g` (including during bulk `teemiao agents update` when a project-local `node_modules/.bin` entry earlier on `PATH` shadows a global installation).
+    - The active Codex binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists this launcher with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects it as a global npm install so `teemiao agents update codex [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g`. This also affects bulk `teemiao agents update` when the project-local entry earlier on `PATH` shadows a global Codex installation. Other agents follow their per-agent ownership rules above; OpenCode and Kimi can select their native updater from a project-local path.
     - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a pinned Codex `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`.
     - Multiple package managers or stale wrappers match the binary (`contradictory ownership metadata detected`). Remove duplicate wrappers or stale global installs so only one manager owns the active binary on `PATH`.
     - The owning package manager (`npm`, `brew`, or `winget`) is not on the current `PATH`.
