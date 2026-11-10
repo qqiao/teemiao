@@ -8,7 +8,7 @@ All notable changes to `teemiao` are documented in this file.
 
 ### Documentation
 
-- Rewrote `README.md` with installation instructions (`cargo install teemiao` and source build), verified CLI usage examples, implementation status, documentation index, and legacy anchor compatibility.
+- Rewrote `README.md` with installation instructions (`cargo install teemiao --locked` and source build), verified CLI usage examples, implementation status, documentation index, preserved section headings, and `Apache License 2.0` licensing text.
 - Added [`docs/cli.md`](docs/cli.md) covering global flags (`-v`/`-q`, `-h`/`--help`, `-V`/`--version`), locale detection and fallback (`LC_ALL`, `LC_MESSAGES`, `LANG`, `en`/`zh-CN`), `teemiao build-info [FILE]` behavior, JSON schema (`revision`, `build_time`), prerequisites, and current error/exit-code behavior, plus the unimplemented `teemiao config-template` status.
 - Added [`docs/agents.md`](docs/agents.md) covering all seven supported coding-agent CLIs (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`), executable precedence, verified installation ownership/channel update paths, `--dry-run`, sequential bulk execution, output stream separation (`stderr` diagnostics vs. `stdout` summary), exit codes (`0`, `1`, `2`, `130`), probe bounds (`5s` / `64 KiB` / `PROBE_ENV_OVERRIDES`), non-sandbox boundaries, and troubleshooting.
 - Added [`CONTRIBUTING.md`](CONTRIBUTING.md) with repository layout, development prerequisites, CI parity and local verification commands, fake-tool safety rules, and release preparation checklist.

@@ -57,13 +57,13 @@ Teemiao never guesses an installation owner from the mere presence of `npm`, `br
 ### Per-Agent Ownership Matrix
 
 1. **Codex (`codex`)**
-   - **npm (`@openai/codex`):** Selected when the launcher or its verified wrapper/symlink target resolves inside `<prefix>/lib/node_modules/@openai/codex` (or `<prefix>/node_modules/@openai/codex` on Windows) with a matching `package.json` name, version, and `bin` entry point. Requires `npm` on `PATH`.
+   - **npm (`@openai/codex`):** Selected when the launcher or its verified wrapper/symlink target resolves inside a global npm prefix (`<prefix>/lib/node_modules/@openai/codex`, or `<prefix>/node_modules/@openai/codex` on Windows) with a matching `package.json` name, version, and `bin` entry point (`is_local_node_modules_bin_launcher` excludes project-local `node_modules/.bin` launchers from global npm ownership). Requires `npm` on `PATH`.
    - **Homebrew cask / formula:** Selected when the launcher or symlink/wrapper target resolves inside `<brew_prefix>/Caskroom/codex*` or `<brew_prefix>/Cellar/codex`, a matching `brew` binary for `<brew_prefix>` is verified via `brew --prefix`, and the token is present in `brew list --cask` or `brew list --formula`.
    - **Official standalone installer:** Selected when the launcher resolves into `<codex_home>/packages/standalone/...` (or resides in `CODEX_INSTALL_DIR` / `~/.local/bin` on Unix / `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` on Windows alongside verified standalone metadata in `CODEX_HOME` or `~/.codex`).
      - Downloads the fixed platform script (`https://chatgpt.com/codex/install.sh` or `https://chatgpt.com/codex/install.ps1`) via `curl --fail --silent --show-error --location --proto =https --tlsv1.2 -o <script>` into a private temporary directory (`0700` on Unix).
      - Validates before execution that the downloaded script is a regular, non-symlink UTF-8 file containing `CODEX_INSTALL_DIR`, `CODEX_HOME`, and `installed successfully` (and starting with `#!/bin/sh` on Unix).
      - Executes `sh <script>` on Unix or `powershell`/`pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <script>` on Windows with `CODEX_NON_INTERACTIVE=1`, `CODEX_INSTALL_DIR=<bin_dir>`, `CODEX_HOME=<codex_home>`, and `CI=1`.
-   - **Manual action required:** Unproven standalone/package ownership, WinGet installations, prerelease npm versions, pinned/prerelease standalone channels (`auto-update-version` or non-`latest`/`stable` channel in `codex-package.json`), `CODEX_INSTALL_DIR` mismatch against the active launcher directory, or contradictory signals across multiple managers.
+   - **Manual action required:** Unproven standalone/package ownership (including project-local `node_modules/.bin` launchers on `PATH`), WinGet installations, prerelease npm versions, pinned/prerelease standalone channels (`auto-update-version` or non-`latest`/`stable` channel in `codex-package.json`), `CODEX_INSTALL_DIR` mismatch against the active launcher directory, or contradictory signals across multiple managers.
 
 2. **Antigravity (`antigravity` / `agy`)**
    - Only `agy` on `PATH` is inspected; `antigravity` desktop launchers are ignored.
@@ -105,7 +105,7 @@ Teemiao distinguishes between tools that are **absent** from `PATH` and installa
 | Situation | `teemiao agents list` | `teemiao agents update` (bulk) | `teemiao agents update <agent>` (targeted) |
 |---|---|---|---|
 | **Absent tool** (not on `PATH`, non-executable file, broken symlink, desktop launcher, or unverified generic `agent`/`qoder` binary) | Omitted from output; exits `0`. | Skipped; never installed; does not cause failure. | Prints `Error: agent '<Name>' (<id>) is not installed on PATH. Teemiao only updates existing installations on PATH.` to `stderr` and exits `1`. |
-| **Unsupported or ambiguous installation** (detected on `PATH`, e.g., owned by `pnpm`/`bun`/`yarn`/`nix`/`snap`/`flatpak`/`scoop`/`chocolatey`/system `/usr/bin`, prerelease channel, legacy Kimi/OpenCode, or unproven owner) | Listed on `stdout` with `update: manual action required (<reason>)`; exits `0`. | Included in the sequence; prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary; continues to remaining agents and exits `1`. | Prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary without running an updater; exits `1`. |
+| **Unsupported or ambiguous installation** (detected on `PATH`, e.g., project-local `node_modules/.bin` launchers, installations owned by `pnpm`/`bun`/`yarn`/`nix`/`snap`/`flatpak`/`scoop`/`chocolatey`/system `/usr/bin`, prerelease channel, legacy Kimi/OpenCode, or unproven owner) | Listed on `stdout` with `update: manual action required (<reason>)`; exits `0`. | Included in the sequence; prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary; continues to remaining agents and exits `1`. | Prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary without running an updater; exits `1`. |
 
 ## Output Streams and Formatting
 
@@ -168,10 +168,11 @@ Every discovery, version, help, and package-manager inventory probe runs through
 
 - **Installed agent does not appear in `teemiao agents list`:**
   - Verify that the CLI binary's directory (for example `~/.local/bin`, `~/.opencode/bin`, `~/.cursor/bin`, or your global `npm` bin directory) is present in the current process `PATH` and that the file has executable permissions (`chmod +x` on Unix).
-  - Remember that Teemiao ignores desktop app launchers (`cursor`, `antigravity`, `/Applications/Qoder.app`) and project-local `node_modules/.bin` directories.
+  - Remember that Teemiao ignores desktop app launchers (`cursor`, `antigravity`, `/Applications/Qoder.app`) and unverified generic `agent` or `qoder` binaries that lack CLI identity evidence.
 - **`manual action required` reported for an npm, Homebrew, or standalone installation:**
   - Check the `reason` and `guidance` printed on `stderr` and under `Update summary`.
   - Common causes include:
+    - The active binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists project-local `node_modules/.bin` executables on `PATH` with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects them as global npm installs so `teemiao agents update [<agent>] [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g`.
     - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a pinned Codex `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`.
     - Multiple package managers or stale wrappers match the binary (`contradictory ownership metadata detected`). Remove duplicate wrappers or stale global installs so only one manager owns the active binary on `PATH`.
     - The owning package manager (`npm`, `brew`, or `winget`) is not on the current `PATH`.
