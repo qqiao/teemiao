@@ -123,3 +123,14 @@ Executed locally on macOS (`Darwin arm64`, `rustc 1.99.1`, `cargo 1.99.1`):
 
 ### 5.5 `performance-optimization`
 - Confirmed zero runtime overhead was introduced: Rust code edits were limited to doc comments and localized static help strings, and the `Cargo.lock` dependency graph remained unchanged.
+
+---
+
+## 6. GitHub Copilot PR #27 Review Thread Dispositions
+
+| Thread ID / Comment | Location | Disposition | Resolution Evidence |
+| --- | --- | --- | --- |
+| `PRRT_kwDOM79GKM610V1o` (`4528240590`) | `README.md:21` | **Already addressed / inapplicable** | Comment was posted against `fcc8c4e`'s inaccurate legacy-anchor claim. Baseline `bae5920:README.md` never had `#build-information-generation`, `#command-line-options`, or `#configuration` headings; all 14 actual `bae5920:README.md` headings are preserved, and the erroneous claim was removed in `664e4e359933c649725f2fac8ebfb6fddb046d2f`. |
+| `PRRT_kwDOM79GKM610V2M` (`4528240653`) | `docs/agents.md:55` & `README.md:46` | **Fixed** | Refined `docs/agents.md:53-59` and `README.md:46` to distinguish positive ownership/metadata/help proof required for package-managed and multi-method paths (`codex`, `claude-code`, `qoder`) from dedicated native self-updating CLIs (`agy`, `opencode`, `kimi`, and identity-verified `cursor`), which run their native updater after excluding foreign package-manager paths, legacy markers, and unsafe Windows `.cmd` shims. |
+| `PRRT_kwDOM79GKM610V2h` (`4528240695`) | `docs/agents.md:171` | **Fixed (addressed in `664e4e3` + shadowing note added)** | Already corrected in `664e4e359933c649725f2fac8ebfb6fddb046d2f` (`docs/agents.md:60`, `:66`, `:108`, `:171`, `:175`); added an explicit note in `docs/agents.md` troubleshooting that a project-local `node_modules/.bin` entry earlier on `PATH` can shadow a global installation and cause bulk `teemiao agents update` to report `manual action required` and exit `1`. |
+| `PRRT_kwDOM79GKM610V3A` (`4528240754`) | `docs/cli.md:92` | **Fixed** | Updated `docs/cli.md:92` so CI/build guidance explicitly requires removing any pre-existing target file (or writing to a fresh path) before invoking `teemiao build-info` and then validating the newly written JSON file and `stderr`, preventing a pre-`File::create` failure from leaving a stale file that passes a simple file-existence check. |

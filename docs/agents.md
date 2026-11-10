@@ -52,7 +52,10 @@ Agents are always listed and updated in this deterministic catalog order:
 
 ## Ownership Resolution and Channel Preservation Rules
 
-Teemiao never guesses an installation owner from the mere presence of `npm`, `brew`, or `winget` on `PATH`. Every automated update plan must be proven from the active launcher path, its symlink-resolved target, verified wrapper script bindings, and local package metadata.
+Teemiao never guesses a package-manager owner from the mere presence of `npm`, `brew`, or `winget` on `PATH`:
+
+- **Package-managed and multi-method agents (`codex`, `claude-code`, `qoder`):** Package-managed update plans (`npm`, `Homebrew`, `WinGet`), Codex standalone installer plans, Claude Code native updates, and Qoder native updates require positive proof from the active launcher path, its symlink-resolved target, verified wrapper script bindings, local package metadata, or `--help` output.
+- **Dedicated native self-updating CLIs (`antigravity`/`agy`, `opencode`, `kimi`, and identity-verified `cursor`):** Select their native self-update subcommand only after verifying CLI identity (where required) and excluding foreign/system package-manager paths (`node_modules`, Homebrew `Caskroom`/`Cellar`, system `/usr/bin`, etc.), legacy installation markers, and unsafe Windows `.cmd` shims.
 
 ### Per-Agent Ownership Matrix
 
@@ -172,7 +175,7 @@ Every discovery, version, help, and package-manager inventory probe runs through
 - **`manual action required` reported for an npm, Homebrew, or standalone installation:**
   - Check the `reason` and `guidance` printed on `stderr` and under `Update summary`.
   - Common causes include:
-    - The active binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists project-local `node_modules/.bin` executables on `PATH` with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects them as global npm installs so `teemiao agents update [<agent>] [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g`.
+    - The active binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists project-local `node_modules/.bin` executables on `PATH` with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects them as global npm installs so `teemiao agents update [<agent>] [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g` (including during bulk `teemiao agents update` when a project-local `node_modules/.bin` entry earlier on `PATH` shadows a global installation).
     - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a pinned Codex `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`.
     - Multiple package managers or stale wrappers match the binary (`contradictory ownership metadata detected`). Remove duplicate wrappers or stale global installs so only one manager owns the active binary on `PATH`.
     - The owning package manager (`npm`, `brew`, or `winget`) is not on the current `PATH`.

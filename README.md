@@ -43,7 +43,7 @@ For the full catalog table, candidate executable precedence, and per-manager upd
 #### Discovery and Safety Boundaries
 
 - **Active `PATH` discovery only:** Only runnable executables on the current process `PATH` are inspected; desktop app bundles and editor extensions are excluded.
-- **Proven ownership and channel preservation:** Updates run only when local metadata proves ownership of the active launcher; unsupported managers, ambiguous wrappers, and pinned/prerelease channels report `manual action required`.
+- **Verified update selection and channel preservation:** Package-managed updates (`npm`, `Homebrew`, `WinGet`), Codex standalone updates, and Claude Code / Qoder native updates require positive local path, package, or `--help` proof, while dedicated native self-updating CLIs (`agy`, `opencode`, `kimi`, and verified Cursor `agent`/`cursor-agent`) run their native updater only after excluding foreign package-manager paths and legacy markers. Unsupported managers, ambiguous wrappers, project-local `node_modules/.bin` launchers, and pinned/prerelease channels report `manual action required`.
 - **Bounded probes (not an OS sandbox):** Discovery probes use a 5-second timeout, a 64 KiB per-stream capture cap, and child environment overrides (`CI=1`, `DISABLE_AUTOUPDATER=1`, etc.), but executing an external binary on `PATH` is not a sandbox or a universal no-network guarantee.
 
 See [`docs/agents.md#ownership-resolution-and-channel-preservation-rules`](docs/agents.md#ownership-resolution-and-channel-preservation-rules) and [`docs/agents.md#probe-safeguards-and-security-boundaries`](docs/agents.md#probe-safeguards-and-security-boundaries) for complete details.
