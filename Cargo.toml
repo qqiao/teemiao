@@ -1,9 +1,14 @@
 [package]
 name = "teemiao"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
-description = "Teemiao is a versatile toolkit designed to streamline application development workflows."
+description = "Developer CLI for Git build metadata and installed AI coding-agent updates."
 license = "Apache-2.0"
+repository = "https://github.com/qqiao/teemiao"
+documentation = "https://github.com/qqiao/teemiao#readme"
+readme = "README.md"
+keywords = ["cli", "build-info", "git", "agents", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 chrono = "0.4.44"

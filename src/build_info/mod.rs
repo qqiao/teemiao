@@ -49,14 +49,13 @@ pub enum BuildInfoError {
     Serialize(#[from] serde_json::Error),
 }
 
-/// Automatically generates structured metadata about your build process in JSON
-/// format.
+/// Generates structured build metadata in JSON format.
 ///
-/// The metadata includes the build time and the current git revision of the
-/// code base.
-///
-/// In the longer term, we would like to support VCS(s) other than just git,
-/// but as of now, this isn't a priority.
+/// Writes a pretty-printed JSON file containing the current Git repository's
+/// shortened `HEAD` revision (`revision`) and the UTC Unix timestamp in seconds
+/// (`build_time`). Requires the current working directory to be a Git
+/// repository with a valid `HEAD` commit and the output file's parent directory
+/// to exist.
 #[derive(Debug, Args)]
 #[command()]
 pub struct BuildInfoCommand {

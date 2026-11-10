@@ -83,7 +83,7 @@ fn agents_without_subcommand_displays_help_and_exits_2() {
     let ver_out = sb.run_teemiao(&["--version"], &[&sb.bin_dir], &[]);
     assert_eq!(ver_out.status.code(), Some(0));
     let ver_stdout = String::from_utf8_lossy(&ver_out.stdout);
-    assert_eq!(ver_stdout.trim(), "teemiao 0.2.1");
+    assert_eq!(ver_stdout.trim(), "teemiao 0.2.2");
 
     let update_help = sb.run_teemiao(&["agents", "update", "--help"], &[&sb.bin_dir], &[]);
     assert_eq!(update_help.status.code(), Some(0));

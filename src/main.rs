@@ -70,7 +70,7 @@ enum Commands {
     )]
     BuildInfo(BuildInfoCommand),
 
-    /// Generate configuration from template.
+    /// Generate configuration from template (currently not implemented; invoking it panics).
     #[command(
         about = t!("commands.config_template.about"),
         long_about = t!("commands.config_template.long_about")
