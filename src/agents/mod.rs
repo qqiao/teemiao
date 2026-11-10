@@ -61,17 +61,22 @@ pub enum AgentId {
     /// Anthropic Claude Code CLI (`claude-code`, alias `claude`).
     #[value(name = "claude-code", alias = "claude")]
     ClaudeCode,
+
+    /// Qoder CLI (`qoder`, alias `qodercli`).
+    #[value(name = "qoder", alias = "qodercli")]
+    Qoder,
 }
 
 impl AgentId {
     /// Complete supported catalog in deterministic order.
-    pub const ALL: [AgentId; 6] = [
+    pub const ALL: [AgentId; 7] = [
         AgentId::Codex,
         AgentId::Antigravity,
         AgentId::OpenCode,
         AgentId::Kimi,
         AgentId::Cursor,
         AgentId::ClaudeCode,
+        AgentId::Qoder,
     ];
 
     /// Canonical identifier used in CLI arguments and output.
@@ -83,6 +88,7 @@ impl AgentId {
             AgentId::Kimi => "kimi",
             AgentId::Cursor => "cursor",
             AgentId::ClaudeCode => "claude-code",
+            AgentId::Qoder => "qoder",
         }
     }
 
@@ -95,6 +101,7 @@ impl AgentId {
             AgentId::Kimi => "Kimi",
             AgentId::Cursor => "Cursor",
             AgentId::ClaudeCode => "Claude Code",
+            AgentId::Qoder => "Qoder",
         }
     }
 
@@ -107,6 +114,7 @@ impl AgentId {
             AgentId::Kimi => &["kimi"],
             AgentId::Cursor => &["agent", "cursor-agent"],
             AgentId::ClaudeCode => &["claude"],
+            AgentId::Qoder => &["qodercli", "qoder"],
         }
     }
 }
@@ -128,8 +136,9 @@ impl FromStr for AgentId {
             "kimi" => Ok(AgentId::Kimi),
             "cursor" => Ok(AgentId::Cursor),
             "claude-code" | "claude" => Ok(AgentId::ClaudeCode),
+            "qoder" | "qodercli" => Ok(AgentId::Qoder),
             other => Err(format!(
-                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, or claude-code/claude)"
+                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude, or qoder/qodercli)"
             )),
         }
     }
@@ -1218,22 +1227,43 @@ fn run_update(
         }
     };
 
-    let mut results: Vec<AgentUpdateResult> = Vec::with_capacity(targets.len());
+    let total = targets.len();
+    let mut results: Vec<AgentUpdateResult> = Vec::with_capacity(total);
     let mut was_interrupted = false;
 
-    for agent in &targets {
+    for (idx, agent) in targets.iter().enumerate() {
         if runner.is_cancelled() {
             was_interrupted = true;
             break;
         }
 
+        if idx > 0 {
+            let _ = writeln!(stderr);
+        }
+        let _ = writeln!(
+            stderr,
+            "{}",
+            t!(
+                "agents.update.section_header",
+                index = idx + 1,
+                total = total,
+                name = agent.id.display_name(),
+                id = agent.id.canonical_id()
+            )
+        );
+        let _ = stderr.flush();
+
         for warning in &agent.warnings {
             let _ = writeln!(stderr, "{warning}");
+        }
+        if !agent.warnings.is_empty() {
+            let _ = stderr.flush();
         }
 
         let res = execute_agent_update(agent, args.dry_run, env, runner, cache);
         let interrupted = res.outcome.is_interrupted();
         emit_update_diagnostics(&res, stderr);
+        let _ = stderr.flush();
         results.push(res);
 
         if interrupted || runner.is_cancelled() {
@@ -1242,9 +1272,13 @@ fn run_update(
         }
     }
 
-    for res in &results {
-        let line = format_update_summary_line(res);
-        let _ = writeln!(stdout, "{line}");
+    if !results.is_empty() {
+        let _ = writeln!(stdout);
+        let _ = writeln!(stdout, "{}", t!("agents.update.summary_header"));
+        for res in &results {
+            let line = format_update_summary_line(res);
+            let _ = writeln!(stdout, "{line}");
+        }
     }
 
     if was_interrupted {
@@ -1619,6 +1653,10 @@ mod tests {
         assert_eq!("claude-code".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
         assert_eq!("claude".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
         assert_eq!("CLAUDE".parse::<AgentId>(), Ok(AgentId::ClaudeCode));
+        assert_eq!("qoder".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("QODER".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("qodercli".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("QoderCli".parse::<AgentId>(), Ok(AgentId::Qoder));
         assert!("unknown-agent".parse::<AgentId>().is_err());
     }
 
@@ -2413,7 +2451,8 @@ mod tests {
         assert_eq!(code, 0);
         assert!(runner_dry.update_calls().is_empty());
         let out_str = String::from_utf8(stdout).unwrap();
-        assert_eq!(out_str.lines().count(), 3);
+        assert!(out_str.starts_with("\nUpdate summary\n"));
+        assert_eq!(out_str.lines().count(), 5);
         assert!(out_str.contains("Antigravity (antigravity): dry-run (would run: agy update"));
         assert!(out_str.contains("OpenCode (opencode): dry-run (would run: opencode upgrade"));
         assert!(out_str.contains("Kimi (kimi): dry-run (would run: kimi upgrade --yes"));
@@ -3847,5 +3886,1248 @@ fn main() -> ExitCode {
                 "stderr must report probe failure when job setup fails: {list_err}"
             );
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedRecordingWriter {
+        state: Arc<Mutex<(Vec<u8>, usize)>>,
+    }
+
+    impl SharedRecordingWriter {
+        fn snapshot(&self) -> (String, usize) {
+            let guard = self.state.lock().unwrap();
+            (String::from_utf8_lossy(&guard.0).into_owned(), guard.1)
+        }
+    }
+
+    impl Write for SharedRecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut guard = self.state.lock().unwrap();
+            guard.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut guard = self.state.lock().unwrap();
+            guard.1 += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn update_output_separates_sections_flushes_headers_before_updater_and_localizes_summary() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let bin = home.join(".local").join("bin");
+        create_executable(&bin.join("agy"), "#!/bin/sh\n");
+        create_executable(&bin.join("opencode"), "#!/bin/sh\n");
+        create_executable(&bin.join("kimi"), "#!/bin/sh\n");
+
+        let env = test_env(&[&bin], &home);
+        let shared_stderr = SharedRecordingWriter::default();
+        let stderr_in_runner = shared_stderr.clone();
+        let observed_pre_update: Arc<Mutex<Vec<(String, String, usize)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let observed_clone = Arc::clone(&observed_pre_update);
+
+        let agy_versions = Mutex::new(VecDeque::from(vec![
+            "Antigravity CLI 1.0.0",
+            "Antigravity CLI 1.1.0",
+        ]));
+        let runner = FakeProcessRunner::new(
+            move |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                match name.as_ref() {
+                    "agy" => {
+                        let v = agy_versions
+                            .lock()
+                            .unwrap()
+                            .pop_front()
+                            .unwrap_or("Antigravity CLI 1.1.0");
+                        Ok(ok_output(v))
+                    }
+                    "opencode" => Ok(ok_output("opencode 0.5.0")),
+                    "kimi" => Ok(ok_output("kimi 0.4.0")),
+                    _ => unreachable!(),
+                }
+            },
+            move |req| {
+                let name = req
+                    .program
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let (snap, flushes) = stderr_in_runner.snapshot();
+                observed_clone
+                    .lock()
+                    .unwrap()
+                    .push((name.clone(), snap, flushes));
+
+                match name.as_str() {
+                    "agy" => Ok(ProcessOutput {
+                        status_code: Some(0),
+                        success: true,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"agy step 1\nagy step 2 without newline".to_vec(),
+                        stderr: b"agy warn line 1\nagy warn line 2".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    "opencode" => Ok(ProcessOutput {
+                        status_code: Some(1),
+                        success: false,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"opencode stdout detail".to_vec(),
+                        stderr: b"opencode error line 1\nopencode error line 2".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    "kimi" => Ok(ProcessOutput {
+                        status_code: Some(0),
+                        success: true,
+                        interrupted: false,
+                        timed_out: false,
+                        stdout: b"kimi is already up to date".to_vec(),
+                        stderr: Vec::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    }),
+                    _ => unreachable!(),
+                }
+            },
+        );
+
+        let cmd = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: None,
+                dry_run: false,
+            }),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr_writer = shared_stderr.clone();
+        let code = cmd.run_with_io(&env, &runner, &mut stdout, &mut stderr_writer);
+        assert_eq!(code, 1);
+
+        let observations = observed_pre_update.lock().unwrap().clone();
+        assert_eq!(observations.len(), 3);
+        // 1. Before `agy` updater runs, its header is already written and flushed to stderr.
+        assert_eq!(
+            observations[0].1,
+            "--- [1/3] Antigravity (antigravity) ---\n"
+        );
+        assert!(observations[0].2 >= 1);
+
+        // 2. Before `opencode` updater runs, `agy` diagnostics ended with a newline, followed by a blank line and header 2/3.
+        assert!(
+            observations[1]
+                .1
+                .starts_with("--- [1/3] Antigravity (antigravity) ---\nDiagnostics for Antigravity (antigravity): agy warn line 1\nagy warn line 2\nagy step 1\nagy step 2 without newline\n\n--- [2/3] OpenCode (opencode) ---\n"),
+            "unexpected stderr before opencode updater: {:?}",
+            observations[1].1
+        );
+        assert!(observations[1].2 > observations[0].2);
+
+        // 3. Before `kimi` updater runs, `opencode` failure and multiline diagnostics are confined to section 2/3, followed by a blank line and header 3/3.
+        assert!(
+            observations[2]
+                .1
+                .ends_with("opencode error line 1\nopencode error line 2\nopencode stdout detail\n\n--- [3/3] Kimi (kimi) ---\n"),
+            "unexpected stderr before kimi updater: {:?}",
+            observations[2].1
+        );
+
+        let (final_stderr, _) = shared_stderr.snapshot();
+        assert!(final_stderr.ends_with('\n'));
+        assert!(!final_stderr.contains("Update summary"));
+
+        let final_stdout = String::from_utf8(stdout).unwrap();
+        assert!(
+            final_stdout.starts_with("\nUpdate summary\nAntigravity (antigravity): updated"),
+            "expected leading blank line and 'Update summary' on stdout, got: {final_stdout:?}"
+        );
+        let stdout_lines: Vec<&str> = final_stdout.lines().collect();
+        assert_eq!(stdout_lines[0], "");
+        assert_eq!(stdout_lines[1], "Update summary");
+        assert!(stdout_lines[2].starts_with("Antigravity (antigravity): updated (1.0.0 -> 1.1.0;"));
+        assert!(stdout_lines[3].starts_with("OpenCode (opencode): failed"));
+        assert!(stdout_lines[4].starts_with("Kimi (kimi): up to date (version: 0.4.0;"));
+
+        // Cancellation on agent 1 of 3 must not print headers for agents 2 or 3
+        let runner_cancel = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                Ok(ok_output(&format!("{name} 1.0.0")))
+            },
+            |_| {
+                Ok(ProcessOutput {
+                    status_code: Some(130),
+                    success: false,
+                    interrupted: true,
+                    timed_out: false,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+        );
+        let mut cancel_out = Vec::new();
+        let mut cancel_err = Vec::new();
+        let cancel_code = cmd.run_with_io(&env, &runner_cancel, &mut cancel_out, &mut cancel_err);
+        assert_eq!(cancel_code, 130);
+        let cancel_err_str = String::from_utf8(cancel_err).unwrap();
+        assert!(cancel_err_str.contains("--- [1/3] Antigravity (antigravity) ---"));
+        assert!(!cancel_err_str.contains("--- [2/3]"));
+        assert!(!cancel_err_str.contains("--- [3/3]"));
+
+        // Single-agent dry-run still renders a `[1/1]` section header and a separated summary block,
+        // and Simplified Chinese (`zh-CN`) localization keys are verified without mutating global locale across parallel unit tests.
+        let single_dry_cmd = AgentsCommand {
+            command: AgentsSubcommand::Update(UpdateArgs {
+                agent: Some(AgentId::Antigravity),
+                dry_run: true,
+            }),
+        };
+        let mut single_out = Vec::new();
+        let mut single_err = Vec::new();
+        let single_code =
+            single_dry_cmd.run_with_io(&env, &runner, &mut single_out, &mut single_err);
+        assert_eq!(single_code, 0);
+        let single_err_str = String::from_utf8(single_err).unwrap();
+        let single_out_str = String::from_utf8(single_out).unwrap();
+        assert_eq!(single_err_str, "--- [1/1] Antigravity (antigravity) ---\n");
+        assert!(
+            single_out_str.starts_with("\nUpdate summary\nAntigravity (antigravity): dry-run"),
+            "expected single-agent summary header and dry-run row: {single_out_str:?}"
+        );
+        assert_eq!(
+            t!(
+                "agents.update.section_header",
+                locale = "zh-CN",
+                index = 1,
+                total = 1,
+                name = "Antigravity",
+                id = "antigravity"
+            )
+            .as_ref(),
+            "--- [1/1] Antigravity (antigravity) ---"
+        );
+        assert_eq!(
+            t!("agents.update.summary_header", locale = "zh-CN").as_ref(),
+            "更新摘要"
+        );
+        assert_eq!(
+            t!(
+                "agents.update.dry_run_plan",
+                locale = "zh-CN",
+                name = "Antigravity",
+                id = "antigravity",
+                command = "agy update",
+                target = "/bin/agy",
+                version = "1.0.0"
+            )
+            .as_ref(),
+            "Antigravity (antigravity): 演练模式 (将运行: agy update; 目标: /bin/agy; 当前版本: 1.0.0)"
+        );
+    }
+
+    #[test]
+    fn qoder_discovery_precedence_desktop_rejection_native_and_npm_ownership() {
+        rust_i18n::set_locale("en");
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+
+        // 1. Catalog order places Qoder 7th after Claude Code; `qodercli` is preferred over `qoder`
+        let bin_primary = tmp.path().join("bin-primary");
+        let bin_secondary = tmp.path().join("bin-secondary");
+        create_executable(&bin_primary.join("claude"), "#!/bin/sh\n");
+        create_executable(&bin_primary.join("qoder"), "#!/bin/sh\n");
+        create_executable(&bin_secondary.join("qodercli"), "#!/bin/sh\n");
+        let env_both = test_env(&[&bin_primary, &bin_secondary], &home);
+        let runner_both = FakeProcessRunner::new(
+            |req| {
+                let name = req.program.file_name().unwrap().to_string_lossy();
+                let is_help = req.args.iter().any(|a| a == "--help");
+                match (name.as_ref(), is_help) {
+                    ("claude", false) => Ok(ok_output("2.1.0 (Claude Code)")),
+                    ("qodercli", false) => Ok(ok_output("qodercli 0.2.1")),
+                    ("qodercli", true) => Ok(ok_output(
+                        "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                    )),
+                    ("qoder", false) => Ok(ok_output("Qoder CLI 0.1.9")),
+                    ("qoder", true) => Ok(ok_output(
+                        "Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+                    )),
+                    _ => unreachable!(),
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache = PackageManagerCache::new();
+        let all = discover_all_agents(&env_both, &runner_both, &mut cache);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, AgentId::ClaudeCode);
+        assert_eq!(all[1].id, AgentId::Qoder);
+        assert_eq!(all[1].launcher_path, bin_secondary.join("qodercli"));
+        assert_eq!(all[1].version.as_deref(), Some("0.2.1"));
+        assert_eq!(
+            all[1].owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: bin_secondary.join("qodercli"),
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+
+        // 2. Fallback to verified `qoder` when `qodercli` is absent or unverified
+        let bin_fallback = tmp.path().join("bin-fallback");
+        create_executable(&bin_fallback.join("qoder"), "#!/bin/sh\n");
+        let env_fallback = test_env(&[&bin_fallback], &home);
+        let runner_fallback = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+                    ))
+                } else {
+                    Ok(ok_output("0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_fb = PackageManagerCache::new();
+        let qoder_fb = discover_agent(
+            AgentId::Qoder,
+            &env_fallback,
+            &runner_fallback,
+            &mut cache_fb,
+        )
+        .unwrap();
+        assert_eq!(qoder_fb.launcher_path, bin_fallback.join("qoder"));
+        assert_eq!(qoder_fb.version.as_deref(), Some("0.2.0"));
+        assert_eq!(
+            qoder_fb.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: bin_fallback.join("qoder"),
+                args: vec!["update".to_string()],
+                display_command: "qoder update".to_string(),
+            }
+        );
+
+        // 3. Reject desktop/IDE `qoder`, bare product/version `qoder` without CLI help/update evidence, and conflicting banners
+        for (ver_out, help_out) in [
+            ("Qoder Desktop 1.2.0", "Usage: qoder --open-window"),
+            ("Qoder IDE 1.2.0", "Qoder IDE"),
+            ("Qoder 1.2.0", "Usage: qoder [file]"),
+            ("1.2.0", ""),
+            ("Datadog Agent 7.50.0", "Datadog agent"),
+            ("Acme Qoder CLI 1.0.0", "Commands:\n  update  Update"),
+        ] {
+            let runner_reject = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(help_out))
+                    } else {
+                        Ok(ok_output(ver_out))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_rej = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_fallback,
+                    &runner_reject,
+                    &mut cache_rej
+                )
+                .is_none(),
+                "expected qoder candidate with version={ver_out:?} help={help_out:?} to be rejected"
+            );
+        }
+
+        // 4. Qoder CLI without `update` interface in `--help` (and not proven npm) is discovered with ManualActionRequired
+        let runner_no_update_cmd = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output("Qoder CLI\nUsage: qoder [options]\n  --help"))
+                } else {
+                    Ok(ok_output("Qoder CLI 0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_manual = PackageManagerCache::new();
+        let qoder_manual = discover_agent(
+            AgentId::Qoder,
+            &env_fallback,
+            &runner_no_update_cmd,
+            &mut cache_manual,
+        )
+        .unwrap();
+        assert!(matches!(
+            qoder_manual.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 5. Proven npm `@qoder-ai/qodercli` ownership (without needing `--help` probe) and missing-npm manual fallback
+        let npm_prefix = tmp.path().join("npm-qoder");
+        let npm_bin = npm_prefix.join("bin");
+        let pkg_dir = npm_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(pkg_dir.join("bin")).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        create_executable(
+            &npm_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pkg_dir.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&npm_bin.join("npm"), "#!/bin/sh\n");
+
+        let env_npm = test_env(&[&npm_bin], &home);
+        let runner_npm = FakeProcessRunner::new(
+            |req| {
+                assert!(
+                    !req.args.iter().any(|a| a == "--help"),
+                    "proven npm @qoder-ai/qodercli should not need a --help probe"
+                );
+                Ok(ok_output("qodercli 0.2.0"))
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_npm = PackageManagerCache::new();
+        let qoder_npm =
+            discover_agent(AgentId::Qoder, &env_npm, &runner_npm, &mut cache_npm).unwrap();
+        assert_eq!(
+            qoder_npm.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: npm_bin.join("npm"),
+                prefix: npm_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // Removing `npm` from PATH must yield ManualActionRequired and never fall back to native self-update
+        fs::remove_file(npm_bin.join("npm")).unwrap();
+        let runner_missing_npm = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                    ))
+                } else {
+                    Ok(ok_output("qodercli 0.2.0"))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_missing_npm = PackageManagerCache::new();
+        let qoder_missing_npm = discover_agent(
+            AgentId::Qoder,
+            &env_npm,
+            &runner_missing_npm,
+            &mut cache_missing_npm,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                qoder_missing_npm.owner,
+                UpdateOwner::ManualActionRequired { .. }
+            ),
+            "npm-owned Qoder without npm on PATH must not fall back to native update: {:?}",
+            qoder_missing_npm.owner
+        );
+
+        // 6. Wrong-prefix wrapper in `stale/bin/qodercli` pointing to `active` must yield ManualActionRequired (neither stale npm nor native update)
+        let stale_prefix = tmp.path().join("npm-qoder-stale");
+        let stale_bin = stale_prefix.join("bin");
+        let stale_pkg_dir = stale_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(&stale_bin).unwrap();
+        fs::create_dir_all(&stale_pkg_dir).unwrap();
+        fs::write(
+            stale_pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        create_executable(
+            &stale_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pkg_dir.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&stale_bin.join("npm"), "#!/bin/sh\n");
+        let env_stale = test_env(&[&stale_bin], &home);
+        let mut cache_stale = PackageManagerCache::new();
+        let qoder_stale = discover_agent(
+            AgentId::Qoder,
+            &env_stale,
+            &runner_missing_npm,
+            &mut cache_stale,
+        )
+        .unwrap();
+        assert!(
+            matches!(qoder_stale.owner, UpdateOwner::ManualActionRequired { .. }),
+            "wrong-prefix wrapper must not authorize stale npm update or native self-update: {:?}",
+            qoder_stale.owner
+        );
+
+        // 7. Unsupported manager (.bun) must yield ManualActionRequired even if --help has `update`
+        let bun_bin = home.join(".bun").join("bin");
+        create_executable(&bun_bin.join("qodercli"), "#!/bin/sh\n");
+        let env_bun = test_env(&[&bun_bin], &home);
+        let mut cache_bun = PackageManagerCache::new();
+        let qoder_bun = discover_agent(
+            AgentId::Qoder,
+            &env_bun,
+            &runner_missing_npm,
+            &mut cache_bun,
+        )
+        .unwrap();
+        assert!(
+            matches!(qoder_bun.owner, UpdateOwner::ManualActionRequired { ref reason, .. } if reason.contains("bun")),
+            "expected bun-managed Qoder to require manual action: {:?}",
+            qoder_bun.owner
+        );
+
+        // 8. Windows .cmd shim discovery: valid npm .cmd shim and unsafe .cmd path metacharacter guard
+        let win_prefix = tmp.path().join("win_npm_qoder");
+        let win_pkg = win_prefix
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(win_pkg.join("bin")).unwrap();
+        fs::write(
+            win_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            win_prefix.join("qodercli.cmd"),
+            "@echo off\r\n\"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\qodercli.exe\" %*\r\n",
+        )
+        .unwrap();
+        fs::write(win_prefix.join("npm.cmd"), "@echo off\r\n").unwrap();
+        let env_win = DiscoveryEnv {
+            path: OsString::from(win_prefix.to_string_lossy().as_ref()),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: None,
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        let mut cache_win = PackageManagerCache::new();
+        let qoder_win =
+            discover_agent(AgentId::Qoder, &env_win, &runner_npm, &mut cache_win).unwrap();
+        assert_eq!(
+            qoder_win.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: win_prefix.join("npm.cmd"),
+                prefix: win_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        let unsafe_win_dir = tmp.path().join("win&unsafe");
+        fs::create_dir_all(&unsafe_win_dir).unwrap();
+        fs::write(unsafe_win_dir.join("qodercli.cmd"), "@echo off\r\n").unwrap();
+        let env_unsafe_win = DiscoveryEnv {
+            path: OsString::from(unsafe_win_dir.to_string_lossy().as_ref()),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: None,
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        let runner_must_not_run = FakeProcessRunner::new(|_| unreachable!(), |_| unreachable!());
+        let mut cache_unsafe = PackageManagerCache::new();
+        let qoder_unsafe = discover_agent(
+            AgentId::Qoder,
+            &env_unsafe_win,
+            &runner_must_not_run,
+            &mut cache_unsafe,
+        )
+        .unwrap();
+        assert_eq!(qoder_unsafe.version, None);
+        assert!(matches!(
+            qoder_unsafe.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 9. Preserve ownership through wrappers: cross-prefix Homebrew Cellar/Caskroom, foreign manager,
+        // and unresolved forwarding wrappers must remain ManualActionRequired and never permit native update
+        let wrapper_bin = tmp.path().join("wrapper").join("bin");
+        let separate_cellar_bin = tmp
+            .path()
+            .join("separate-brew")
+            .join("Cellar")
+            .join("qodercli")
+            .join("0.9.0")
+            .join("bin")
+            .join("qodercli");
+        create_executable(&separate_cellar_bin, "#!/bin/sh\n");
+        create_executable(
+            &wrapper_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                separate_cellar_bin.display()
+            ),
+        );
+        let env_wrapped_brew = test_env(&[&wrapper_bin], &home);
+        let runner_affirmative = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Qoder CLI\nCommands:\n  update  Update Qoder CLI",
+                    ))
+                } else {
+                    Ok(ok_output("Qoder CLI 0.9.0"))
+                }
+            },
+            |_| panic!("managed wrapper must never invoke updater"),
+        );
+        let mut cache_wb = PackageManagerCache::new();
+        let qoder_wb = discover_agent(
+            AgentId::Qoder,
+            &env_wrapped_brew,
+            &runner_affirmative,
+            &mut cache_wb,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                qoder_wb.owner,
+                UpdateOwner::ManualActionRequired { ref reason, .. } if reason.contains("Homebrew")
+            ),
+            "cross-prefix Homebrew wrapper must require manual action: {:?}",
+            qoder_wb.owner
+        );
+
+        let unverified_wrapper_bin = tmp.path().join("unverified-wrapper").join("bin");
+        let mystery_target = tmp.path().join("mystery- target").join("qodercli");
+        create_executable(&mystery_target, "#!/bin/sh\n");
+        create_executable(
+            &unverified_wrapper_bin.join("qodercli"),
+            &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", mystery_target.display()),
+        );
+        let env_mystery = test_env(&[&unverified_wrapper_bin], &home);
+        let mut cache_mystery = PackageManagerCache::new();
+        let qoder_mystery = discover_agent(
+            AgentId::Qoder,
+            &env_mystery,
+            &runner_affirmative,
+            &mut cache_mystery,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                qoder_mystery.owner,
+                UpdateOwner::ManualActionRequired { .. }
+            ),
+            "forwarding wrapper to unresolved external target must remain manual: {:?}",
+            qoder_mystery.owner
+        );
+
+        // 10. Directory names (.qodercli, @qoder-ai/qodercli) and nearby unlinked package.json
+        // cannot establish CLI identity for shared `qoder` name
+        let dot_qodercli_root = tmp.path().join(".qodercli");
+        let dot_qodercli_bin = dot_qodercli_root.join("bin");
+        create_executable(&dot_qodercli_bin.join("qoder"), "#!/bin/sh\n");
+        fs::write(
+            dot_qodercli_root.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        let env_dir_hint = test_env(&[&dot_qodercli_bin], &home);
+        let runner_index_tool = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    Ok(ok_output(
+                        "Usage: index-tool\nCommands:\n  update  Rebuild the document index",
+                    ))
+                } else {
+                    Ok(ok_output("1.2.3"))
+                }
+            },
+            |_| panic!("unrelated tool in .qodercli/bin must never be updated"),
+        );
+        let mut cache_dir_hint = PackageManagerCache::new();
+        assert!(
+            discover_agent(
+                AgentId::Qoder,
+                &env_dir_hint,
+                &runner_index_tool,
+                &mut cache_dir_hint
+            )
+            .is_none(),
+            "shared `qoder` under .qodercli/bin with nearby package.json and index-tool help must be rejected"
+        );
+
+        // Unbound `qoder` inside node_modules/@qoder-ai/qodercli/bin/qoder when package.json `bin` only binds `qodercli` is rejected
+        let unbound_npm_prefix = tmp.path().join("npm-unbound-qoder");
+        let unbound_npm_bin = unbound_npm_prefix.join("bin");
+        let unbound_pkg_dir = unbound_npm_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(unbound_pkg_dir.join("bin")).unwrap();
+        fs::write(
+            unbound_pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &unbound_npm_bin.join("qoder"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                unbound_pkg_dir.join("bin").join("qoder").display()
+            ),
+        );
+        let env_unbound_npm = test_env(&[&unbound_npm_bin], &home);
+        let mut cache_unbound = PackageManagerCache::new();
+        assert!(
+            discover_agent(
+                AgentId::Qoder,
+                &env_unbound_npm,
+                &runner_index_tool,
+                &mut cache_unbound
+            )
+            .is_none(),
+            "shared `qoder` not matching package.json `bin` entry point must be rejected"
+        );
+
+        // Positive entry-point-bound `qoder` in package.json `bin` succeeds as NpmGlobal,
+        // while extensionless `bin/qoder` and `.exe` `bin/qoder.exe` siblings must NOT match `"bin": {"qoder": "bin/qoder.js"}`
+        fs::write(
+            unbound_pkg_dir.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qoder":"bin/qoder.js","qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &unbound_pkg_dir.join("bin").join("qoder.js"),
+            "#!/bin/sh\nprintf 'Qoder CLI 1.2.3\\n'\n",
+        );
+        for wrong_sibling in ["qoder", "qoder.exe"] {
+            let sibling_path = unbound_pkg_dir.join("bin").join(wrong_sibling);
+            create_executable(&sibling_path, "#!/bin/sh\nprintf '1.2.3\\n'\n");
+            create_executable(
+                &unbound_npm_bin.join("qoder"),
+                &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", sibling_path.display()),
+            );
+            let mut cache_sibling = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_unbound_npm,
+                    &runner_index_tool,
+                    &mut cache_sibling
+                )
+                .is_none(),
+                "sibling `{wrong_sibling}` must not match declared entry point `bin/qoder.js`"
+            );
+        }
+        create_executable(
+            &unbound_npm_bin.join("qoder"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                unbound_pkg_dir.join("bin").join("qoder.js").display()
+            ),
+        );
+        create_executable(&unbound_npm_bin.join("npm"), "#!/bin/sh\n");
+        let runner_bound_qoder =
+            FakeProcessRunner::new(|_| Ok(ok_output("1.2.3")), |_| unreachable!());
+        let mut cache_bound = PackageManagerCache::new();
+        let qoder_bound = discover_agent(
+            AgentId::Qoder,
+            &env_unbound_npm,
+            &runner_bound_qoder,
+            &mut cache_bound,
+        )
+        .unwrap();
+        assert_eq!(
+            qoder_bound.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: unbound_npm_bin.join("npm"),
+                prefix: unbound_npm_prefix.clone(),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // Windows `.cmd` shim entry-point binding: `qoder.cmd` targeting `bin\qoder` or `bin\qoder.exe`
+        // must not match `"bin": {"qoder": "bin/qoder.js"}`, while `bin\qoder.js` succeeds
+        let win_ep_prefix = tmp.path().join("win-npm-ep");
+        let win_ep_pkg = win_ep_prefix
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(win_ep_pkg.join("bin")).unwrap();
+        fs::write(
+            win_ep_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.3","bin":{"qoder":"bin/qoder.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &win_ep_pkg.join("bin").join("qoder.js"),
+            "// qoder.js entry\n",
+        );
+        create_executable(&win_ep_prefix.join("npm.cmd"), "@echo off\r\n");
+        let env_win_ep = DiscoveryEnv {
+            path: std::env::join_paths([&win_ep_prefix]).unwrap(),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: Some(home.join("AppData").join("Local")),
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: true,
+        };
+        for wrong_win_target in ["qoder", "qoder.exe"] {
+            create_executable(
+                &win_ep_pkg.join("bin").join(wrong_win_target),
+                "binary sibling",
+            );
+            create_executable(
+                &win_ep_prefix.join("qoder.cmd"),
+                &format!(
+                    "@echo off\r\n\"%~dp0\\node.exe\" \"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\{wrong_win_target}\" %*\r\n"
+                ),
+            );
+            let mut cache_win_wrong = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    &env_win_ep,
+                    &runner_index_tool,
+                    &mut cache_win_wrong
+                )
+                .is_none(),
+                "Windows .cmd shim targeting `{wrong_win_target}` must not match `bin/qoder.js`"
+            );
+        }
+        create_executable(
+            &win_ep_prefix.join("qoder.cmd"),
+            "@echo off\r\n\"%~dp0\\node.exe\" \"%~dp0\\node_modules\\@qoder-ai\\qodercli\\bin\\qoder.js\" %*\r\n",
+        );
+        let mut cache_win_ok = PackageManagerCache::new();
+        let qoder_win_ok = discover_agent(
+            AgentId::Qoder,
+            &env_win_ep,
+            &runner_bound_qoder,
+            &mut cache_win_ok,
+        )
+        .unwrap();
+        assert_eq!(
+            qoder_win_ok.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: win_ep_prefix.join("npm.cmd"),
+                prefix: win_ep_prefix,
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // 11. Negated update help text and non-zero help probe exit must not authorize native update
+        for (help_exit, help_text) in [
+            (
+                0,
+                "Qoder CLI\nDo not run qodercli update; use your package manager.",
+            ),
+            (0, "Qoder CLI\nqodercli update is disabled by policy"),
+            (
+                0,
+                "Qoder CLI\nCommands:\n  update  Update Qoder CLI\nNote: Do not run qodercli update; use your package manager.",
+            ),
+            (1, "Qoder CLI\nError: qodercli update is disabled by policy"),
+            (1, "Qoder CLI\nCommands:\n  update  Update Qoder CLI"),
+        ] {
+            let runner_neg_help = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        if help_exit == 0 {
+                            Ok(ok_output(help_text))
+                        } else {
+                            Ok(ProcessOutput {
+                                status_code: Some(help_exit),
+                                success: false,
+                                interrupted: false,
+                                timed_out: false,
+                                stdout: help_text.as_bytes().to_vec(),
+                                stderr: Vec::new(),
+                                stdout_truncated: false,
+                                stderr_truncated: false,
+                            })
+                        }
+                    } else {
+                        Ok(ok_output("Qoder CLI 0.9.0"))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_nh = PackageManagerCache::new();
+            let qoder_nh =
+                discover_agent(AgentId::Qoder, &env_both, &runner_neg_help, &mut cache_nh).unwrap();
+            assert!(
+                matches!(qoder_nh.owner, UpdateOwner::ManualActionRequired { .. }),
+                "expected ManualActionRequired for help_exit={help_exit} help_text={help_text:?}, got {:?}",
+                qoder_nh.owner
+            );
+        }
+
+        // 12. Architecture tokens in version banner (`darwin-arm64`, `linux x64`, `aarch64`, `x86_64`) are preserved and accepted
+        for arch_banner in [
+            "Qoder CLI 0.9.1 (darwin-arm64)",
+            "Qoder CLI 0.2.1 (linux x64)",
+            "qodercli 0.9.1 linux-aarch64",
+            "Qoder CLI 0.9.1 (windows-x86_64)",
+        ] {
+            let runner_arch = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(
+                            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                        ))
+                    } else {
+                        Ok(ok_output(arch_banner))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_arch = PackageManagerCache::new();
+            let discovered_arch =
+                discover_agent(AgentId::Qoder, &env_both, &runner_arch, &mut cache_arch)
+                    .unwrap_or_else(|| {
+                        panic!("expected arch banner `{arch_banner}` to be accepted")
+                    });
+            assert!(matches!(
+                discovered_arch.owner,
+                UpdateOwner::NativeSelfUpdate { .. }
+            ));
+        }
+
+        // 13. Help structure vs product branding:
+        // - Valid multiline `Usage:\n  qodercli [command]`, `Usage:\n  qodercli update`, and description paragraphs
+        //   (`An AI coding assistant for your terminal.`) must be accepted as NativeSelfUpdate.
+        // - Conflicting CLI branding in `--help` (`Acme Qoder CLI` for shared `qoder`, `Acme CLI` for `qodercli`,
+        //   `Acme Code CLI helps you build projects.`, or multiline `Usage:` with foreign programs like
+        //   `index-tool [command]`, `index-tool update`, `index-tool --help`, or a second synopsis `index-tool update`)
+        //   must be rejected.
+        for (ver_text, valid_help_layout) in [
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  qodercli update\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nAn AI coding assistant for your terminal.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nAn AI coding assistant for your terminal.\n\nUsage:\n  qodercli [command]\n  qodercli [options]\n\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI - An AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI is an AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+        ] {
+            let runner_valid_help = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(valid_help_layout))
+                    } else {
+                        Ok(ok_output(ver_text))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_vh = PackageManagerCache::new();
+            let discovered_vh =
+                discover_agent(AgentId::Qoder, &env_both, &runner_valid_help, &mut cache_vh)
+                    .unwrap_or_else(|| {
+                        panic!("expected valid help layout to be accepted:\n{valid_help_layout}")
+                    });
+            assert!(
+                matches!(discovered_vh.owner, UpdateOwner::NativeSelfUpdate { .. }),
+                "expected NativeSelfUpdate for valid help layout:\n{valid_help_layout}\ngot: {:?}",
+                discovered_vh.owner
+            );
+        }
+
+        for (env_target, ver_text, conflicting_help) in [
+            (
+                &env_fallback,
+                "1.2.3",
+                "Acme Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "Qoder CLI 0.9.0",
+                "Acme Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Acme CLI\nUsage: qodercli [command]\nCommands:\n  update  Update CLI",
+            ),
+            (
+                &env_both,
+                "Qoder CLI 0.9.0",
+                "Acme Qoder CLI\nAn AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Acme Code CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "Qoder CLI 0.9.0",
+                "Acme Qoder CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "The Acme Code CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  index-tool [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  index-tool update\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  index-tool --help\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  qodercli [command]\n  index-tool update\nCommands:\n  update  Update Qoder CLI",
+            ),
+        ] {
+            let runner_conflicting_help = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(conflicting_help))
+                    } else {
+                        Ok(ok_output(ver_text))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_ch = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    env_target,
+                    &runner_conflicting_help,
+                    &mut cache_ch
+                )
+                .is_none(),
+                "conflicting help banner `{conflicting_help}` must be rejected"
+            );
+        }
+
+        // 14. Windows package-manager-owned installations (WinGet, Scoop, Chocolatey) and wrapper targets
+        // must yield ManualActionRequired and never NativeSelfUpdate
+        let win_winget_dir = home
+            .join("AppData")
+            .join("Local")
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Packages")
+            .join("Qoder.QoderCLI_Microsoft.Winget.Source_8wekyb3d8bbwe");
+        let win_scoop_dir = home
+            .join("scoop")
+            .join("apps")
+            .join("qodercli")
+            .join("current");
+        let win_choco_dir = tmp
+            .path()
+            .join("ProgramData")
+            .join("chocolatey")
+            .join("lib")
+            .join("qodercli")
+            .join("tools");
+        for (expected_mgr, mgr_dir) in [
+            ("winget", &win_winget_dir),
+            ("scoop", &win_scoop_dir),
+            ("chocolatey", &win_choco_dir),
+        ] {
+            create_executable(&mgr_dir.join("qodercli.exe"), "MZ\0");
+            let env_win_mgr = DiscoveryEnv {
+                path: std::env::join_paths([mgr_dir]).unwrap(),
+                pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+                home_dir: Some(home.clone()),
+                local_app_data: Some(home.join("AppData").join("Local")),
+                codex_home: None,
+                codex_install_dir: None,
+                homebrew_prefix: None,
+                is_windows: true,
+            };
+            let runner_win_mgr = FakeProcessRunner::new(
+                |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(
+                            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                        ))
+                    } else {
+                        Ok(ok_output("Qoder CLI 0.9.0"))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_wm = PackageManagerCache::new();
+            let qoder_wm =
+                discover_agent(AgentId::Qoder, &env_win_mgr, &runner_win_mgr, &mut cache_wm)
+                    .unwrap();
+            match &qoder_wm.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains(expected_mgr),
+                        "expected `{expected_mgr}` in manual reason, got: {reason}"
+                    );
+                }
+                other => {
+                    panic!("expected ManualActionRequired for `{expected_mgr}`, got {other:?}")
+                }
+            }
+
+            // Also verify a forwarding `.cmd` wrapper pointing to the managed binary retains ManualActionRequired
+            let win_wrap_dir = tmp.path().join(format!("win-wrap-{expected_mgr}"));
+            create_executable(
+                &win_wrap_dir.join("qodercli.cmd"),
+                &format!(
+                    "@echo off\r\n\"{}\" %*\r\n",
+                    mgr_dir.join("qodercli.exe").display()
+                ),
+            );
+            let env_win_wrap = DiscoveryEnv {
+                path: std::env::join_paths([&win_wrap_dir]).unwrap(),
+                pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+                home_dir: Some(home.clone()),
+                local_app_data: Some(home.join("AppData").join("Local")),
+                codex_home: None,
+                codex_install_dir: None,
+                homebrew_prefix: None,
+                is_windows: true,
+            };
+            let mut cache_ww = PackageManagerCache::new();
+            let qoder_ww = discover_agent(
+                AgentId::Qoder,
+                &env_win_wrap,
+                &runner_win_mgr,
+                &mut cache_ww,
+            )
+            .unwrap();
+            match &qoder_ww.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains(expected_mgr),
+                        "expected `{expected_mgr}` in wrapped manual reason, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected ManualActionRequired for wrapped `{expected_mgr}`, got {other:?}"
+                ),
+            }
+        }
+
+        // 15. Unlisted SemVer prerelease suffix (`0.9.0-preview.1`) in `--version` or in `package.json` when `--version` is unreadable
+        // requires manual action to preserve channel, while build-metadata-only (`0.9.0+20261110`) stays NpmGlobal
+        let pre_prefix = tmp.path().join("npm-qoder-prerelease");
+        let pre_bin = pre_prefix.join("bin");
+        let pre_pkg = pre_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(pre_pkg.join("bin")).unwrap();
+        fs::write(
+            pre_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.9.0-preview.1","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &pre_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pre_pkg.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&pre_bin.join("npm"), "#!/bin/sh\n");
+        let env_pre = test_env(&[&pre_bin], &home);
+        for probe_ver in ["qodercli 0.9.0-preview.1", "qodercli"] {
+            let runner_pre =
+                FakeProcessRunner::new(move |_| Ok(ok_output(probe_ver)), |_| unreachable!());
+            let mut cache_pre = PackageManagerCache::new();
+            let qoder_pre =
+                discover_agent(AgentId::Qoder, &env_pre, &runner_pre, &mut cache_pre).unwrap();
+            match &qoder_pre.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains("prerelease"),
+                        "expected prerelease manual reason for `{probe_ver}`, got: {reason}"
+                    );
+                }
+                other => {
+                    panic!("expected ManualActionRequired for `{probe_ver}`, got {other:?}")
+                }
+            }
+        }
+        fs::write(
+            pre_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.9.0+20261110","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        let runner_build_meta = FakeProcessRunner::new(
+            |_| Ok(ok_output("qodercli 0.9.0+20261110")),
+            |_| unreachable!(),
+        );
+        let mut cache_bm = PackageManagerCache::new();
+        let qoder_bm =
+            discover_agent(AgentId::Qoder, &env_pre, &runner_build_meta, &mut cache_bm).unwrap();
+        assert!(
+            matches!(qoder_bm.owner, UpdateOwner::NpmGlobal { .. }),
+            "build-metadata-only version `0.9.0+20261110` should remain NpmGlobal, got {:?}",
+            qoder_bm.owner
+        );
     }
 }
