@@ -806,6 +806,7 @@ fn evaluate_post_update(
                     &combined_output,
                     &after_version,
                     before_agent.id,
+                    &before_agent.owner,
                 )
             {
                 UpdateOutcome::Updated {
@@ -903,8 +904,7 @@ fn detect_manual_only_updater_output(text: &str) -> Option<(String, String)> {
     None
 }
 
-fn updater_output_has_negation_or_failure(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+fn updater_output_has_negation_or_failure(text: &str, owner: &UpdateOwner) -> bool {
     let negative_markers = [
         "not up to date",
         "not up-to-date",
@@ -939,7 +939,22 @@ fn updater_output_has_negation_or_failure(text: &str) -> bool {
         "couldn't ",
         "unable to ",
     ];
-    negative_markers.iter().any(|m| lower.contains(m))
+    text.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        // The official Codex installer can complete successfully while keeping
+        // old releases. Exempt only these complete cleanup warnings; callers
+        // still require affirmative output and a verified active installation.
+        if matches!(owner, UpdateOwner::CodexStandalone { .. })
+            && matches!(
+                lower.trim(),
+                "warning: could not safely inspect old codex releases; skipped remaining cleanup."
+                    | "warning: could not record installation selection; pruning will be skipped."
+            )
+        {
+            return false;
+        }
+        negative_markers.iter().any(|m| lower.contains(m))
+    })
 }
 
 fn line_has_negation_token(line_lower: &str) -> bool {
@@ -1147,7 +1162,7 @@ fn updater_output_confirms_up_to_date(
     agent_id: AgentId,
     owner: &UpdateOwner,
 ) -> bool {
-    if updater_output_has_negation_or_failure(text) {
+    if updater_output_has_negation_or_failure(text, owner) {
         return false;
     }
 
@@ -1283,8 +1298,13 @@ fn updater_output_confirms_up_to_date(
     false
 }
 
-fn updater_output_confirms_updated(text: &str, active_version: &str, agent_id: AgentId) -> bool {
-    if updater_output_has_negation_or_failure(text) {
+fn updater_output_confirms_updated(
+    text: &str,
+    active_version: &str,
+    agent_id: AgentId,
+    owner: &UpdateOwner,
+) -> bool {
+    if updater_output_has_negation_or_failure(text, owner) {
         return false;
     }
     let ver_lower = active_version.to_ascii_lowercase();

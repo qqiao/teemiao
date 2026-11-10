@@ -1709,6 +1709,11 @@ mod tests {
             .join("current");
         fs::create_dir_all(codex_release.join("bin")).unwrap();
         fs::write(
+            codex_release.parent().unwrap().join("auto-update-version"),
+            "0.10.0-aarch64-apple-darwin",
+        )
+        .unwrap();
+        fs::write(
             codex_release.join("codex-package.json"),
             r#"{"version":"0.10.0","target":"aarch64-apple-darwin","entrypoint":"bin/codex"}"#,
         )
@@ -2123,6 +2128,11 @@ mod tests {
             .join("standalone")
             .join("current");
         fs::create_dir_all(&current_dir).unwrap();
+        fs::write(
+            current_dir.parent().unwrap().join("auto-update-version"),
+            "0.10.0-aarch64-apple-darwin",
+        )
+        .unwrap();
         fs::write(
             current_dir.join("codex-package.json"),
             r#"{"version":"0.10.0","target":"aarch64-apple-darwin","entrypoint":"bin/codex"}"#,
@@ -2576,6 +2586,53 @@ mod tests {
     }
 
     #[test]
+    fn codex_standalone_windows_targeted_release_requires_matching_version() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        let codex_home = tmp.path().join(".codex");
+        let standalone = codex_home.join("packages/standalone");
+        let release = standalone.join("releases/0.167.0-x86_64-pc-windows-msvc");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(
+            release.join("codex-package.json"),
+            r#"{"version":"0.167.0","target":"x86_64-pc-windows-msvc"}"#,
+        )
+        .unwrap();
+        fs::write(
+            standalone.join("auto-update-version"),
+            "0.167.0-x86_64-pc-windows-msvc",
+        )
+        .unwrap();
+        create_executable(&bin.join("codex.exe"), "MZ");
+        create_executable(&bin.join("rg.exe"), "MZ");
+        let env = DiscoveryEnv {
+            path: bin.as_os_str().to_os_string(),
+            pathext: Some(OsString::from(".EXE;.CMD")),
+            codex_home: Some(codex_home),
+            codex_install_dir: Some(bin.clone()),
+            is_windows: true,
+            ..test_env(&[&bin], tmp.path())
+        };
+        for (banner, matches_release) in [("codex-cli 0.167.0", true), ("codex-cli 0.166.0", false)]
+        {
+            let runner = FakeProcessRunner::new(move |_| Ok(ok_output(banner)), |_| unreachable!());
+            let agent = discover_agent(
+                AgentId::Codex,
+                &env,
+                &runner,
+                &mut PackageManagerCache::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(agent.owner, UpdateOwner::CodexStandalone { .. }),
+                matches_release,
+                "{banner}: {:?}",
+                agent.owner
+            );
+        }
+    }
+
+    #[test]
     fn windows_codex_standalone_uses_powershell_with_file_argument() {
         rust_i18n::set_locale("en");
         let tmp = TempDir::new().unwrap();
@@ -2596,6 +2653,14 @@ mod tests {
             .join("standalone")
             .join("current");
         fs::create_dir_all(&win_standalone_dir).unwrap();
+        fs::write(
+            win_standalone_dir
+                .parent()
+                .unwrap()
+                .join("auto-update-version"),
+            "0.10.0-x86_64-pc-windows-msvc",
+        )
+        .unwrap();
         fs::write(
             win_standalone_dir.join("codex-package.json"),
             r#"{"version":"0.10.0","channel":"stable"}"#,

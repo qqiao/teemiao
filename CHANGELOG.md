@@ -2,6 +2,17 @@
 
 All notable changes to `teemiao` are documented in this file.
 
+## [0.2.3] — Unreleased (Prepared)
+
+### Fixed
+
+- Allow stable standalone Codex updates when the official installer records a platform suffix in its release name and update marker; continue requiring manual action for pinned, prerelease, or unreadable channel metadata.
+- Recognize successful standalone Codex updates that emit known non-fatal cleanup warnings while retaining the warnings in diagnostics and preserving failure and version-verification checks.
+
+### Packaging
+
+- Prepare patch version `0.2.3` without changing dependency versions. Publication and release tagging remain pending maintainer approval.
+
 ## [0.2.2] — Unreleased (Prepared)
 
 > **Status:** Prepared in repository; not yet published to [crates.io](https://crates.io/crates/teemiao) or tagged as a GitHub release until maintainer release approval.

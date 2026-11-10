@@ -3945,6 +3945,16 @@ fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+// Release names written by the official Unix and Windows standalone installers.
+const CODEX_STANDALONE_TARGETS: &[&str] = &[
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+];
+
 fn has_matching_codex_standalone_layout(codex_home: &Path, active_version: Option<&str>) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     let current_dir = standalone_root.join("current");
@@ -3955,10 +3965,18 @@ fn has_matching_codex_standalone_layout(codex_home: &Path, active_version: Optio
     }
     let releases_dir = standalone_root.join("releases");
     if let Some(active_ver) = active_version {
-        let ver_dir = releases_dir.join(active_ver);
-        if ver_dir.is_dir() && is_valid_codex_standalone_tree(codex_home, &ver_dir, active_version)
-        {
-            return true;
+        let release_names = std::iter::once(active_ver.to_string()).chain(
+            CODEX_STANDALONE_TARGETS
+                .iter()
+                .map(|target| format!("{active_ver}-{target}")),
+        );
+        for release_name in release_names {
+            let ver_dir = releases_dir.join(release_name);
+            if ver_dir.is_dir()
+                && is_valid_codex_standalone_tree(codex_home, &ver_dir, active_version)
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -4010,11 +4028,19 @@ fn is_valid_codex_standalone_tree(
 fn codex_standalone_is_pinned_or_prerelease(codex_home: &Path) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     let auto_update = standalone_root.join("auto-update-version");
-    if let Ok(contents) = fs::read_to_string(&auto_update) {
-        let trimmed = contents.trim();
-        if is_non_default_channel_version(Some(trimmed)) {
-            return true;
-        }
+    // Explicit --release installs remove this marker. Missing or unreadable
+    // metadata must not opt a pinned installation back into the latest channel.
+    let Ok(contents) = fs::read_to_string(&auto_update) else {
+        return true;
+    };
+    let release_name = contents.trim();
+    let version = CODEX_STANDALONE_TARGETS
+        .iter()
+        .find_map(|target| release_name.strip_suffix(target)?.strip_suffix('-'))
+        .unwrap_or(release_name);
+    // Strip only a known platform suffix, retaining any actual prerelease suffix.
+    if !is_valid_version_token(version) || is_non_default_channel_version(Some(version)) {
+        return true;
     }
     let current_pkg = standalone_root.join("current").join("codex-package.json");
     if let Ok(contents) = fs::read_to_string(current_pkg)

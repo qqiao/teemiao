@@ -24,17 +24,33 @@ fn setup_codex_standalone(
     sb: &TestSandbox,
     version: &str,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
+    let target = if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "aarch64-apple-darwin"
+    };
+    let release_name = format!("{version}-{target}");
     let release_dir = sb
         .home
         .join(".codex")
         .join("packages")
         .join("standalone")
         .join("releases")
-        .join(version);
+        .join(&release_name);
     fs::create_dir_all(&release_dir).unwrap();
     fs::write(
         release_dir.join("codex-package.json"),
-        format!(r#"{{"version":"{version}","channel":"stable"}}"#),
+        format!(r#"{{"layoutVersion":1,"version":"{version}","target":"{target}"}}"#),
+    )
+    .unwrap();
+    fs::write(
+        release_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("auto-update-version"),
+        &release_name,
     )
     .unwrap();
     #[cfg(unix)]
@@ -61,6 +77,67 @@ fn setup_codex_standalone(
 }
 
 #[test]
+fn codex_standalone_release_markers_preserve_update_channels() {
+    for (version, marker, automatic) in [
+        ("0.167.0", Some("0.167.0-aarch64-apple-darwin\n"), true),
+        ("0.167.0", Some("0.167.0-x86_64-apple-darwin"), true),
+        ("0.167.0", Some("0.167.0-aarch64-unknown-linux-musl"), true),
+        ("0.167.0", Some("0.167.0-x86_64-unknown-linux-musl"), true),
+        ("0.167.0", Some("0.167.0-x86_64-pc-windows-msvc"), true),
+        ("0.167.0", Some("0.167.0-aarch64-pc-windows-msvc"), true),
+        ("0.167.0", Some("0.167.0"), true),
+        ("0.167.0", None, false),
+        ("0.167.0", Some(""), false),
+        ("0.167.0", Some("not-a-version"), false),
+        ("0.167.0", Some("0.167.0-unknown-platform"), false),
+        (
+            "0.167.0",
+            Some("0.167.0-beta.1-aarch64-apple-darwin"),
+            false,
+        ),
+        (
+            "0.167.0-preview.1",
+            Some("0.167.0-aarch64-apple-darwin"),
+            false,
+        ),
+    ] {
+        let sb = TestSandbox::new();
+        setup_codex_standalone(&sb, version);
+        let marker_path = sb
+            .home
+            .join(".codex/packages/standalone/auto-update-version");
+        if let Some(marker) = marker {
+            fs::write(marker_path, marker).unwrap();
+        } else {
+            fs::remove_file(marker_path).unwrap();
+        }
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(if automatic { 0 } else { 1 }),
+            "{version}, {marker:?}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            !automatic,
+            "{marker:?}: {stdout}"
+        );
+        assert!(
+            sb.invocations()
+                .iter()
+                .all(|line| line.starts_with("TOOL=codex|")),
+            "dry-run must only probe Codex: {:?}",
+            sb.invocations()
+        );
+    }
+}
+
+#[test]
 fn agents_without_subcommand_displays_help_and_exits_2() {
     let sb = TestSandbox::new();
     let out = sb.run_teemiao(&["agents"], &[&sb.bin_dir], &[]);
@@ -83,7 +160,7 @@ fn agents_without_subcommand_displays_help_and_exits_2() {
     let ver_out = sb.run_teemiao(&["--version"], &[&sb.bin_dir], &[]);
     assert_eq!(ver_out.status.code(), Some(0));
     let ver_stdout = String::from_utf8_lossy(&ver_out.stdout);
-    assert_eq!(ver_stdout.trim(), "teemiao 0.2.2");
+    assert_eq!(ver_stdout.trim(), "teemiao 0.2.3");
 
     let update_help = sb.run_teemiao(&["agents", "update", "--help"], &[&sb.bin_dir], &[]);
     assert_eq!(update_help.status.code(), Some(0));
@@ -593,6 +670,159 @@ fn agents_update_codex_homebrew_cask_positive() {
         "expected 'brew upgrade --cask codex' in invocations: {:?}",
         sb.invocations()
     );
+}
+
+#[test]
+fn codex_cleanup_warning_exemption_does_not_apply_to_native_updaters() {
+    let sb = TestSandbox::new();
+    sb.install_fake_tool(
+        "kimi",
+        &[
+            ("version_stdout", "kimi 1.0.0"),
+            ("update_stdout", "kimi is already up to date"),
+            (
+                "update_stderr",
+                "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.",
+            ),
+        ],
+    );
+    let out = sb.run_teemiao(&["agents", "update", "kimi"], &[&sb.bin_dir], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("unverified"));
+}
+
+#[test]
+fn codex_standalone_cleanup_warnings_require_verified_success() {
+    let success = "Codex CLI 0.167.0 installed successfully.";
+    let cleanup =
+        "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.";
+    let selection = "WARNING: Could not record installation selection; pruning will be skipped.";
+    for (initial_known, output, diagnostics, exit, after, expected, code) in [
+        (
+            true,
+            success,
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "up to date",
+            0,
+        ),
+        (
+            true,
+            success,
+            selection,
+            "0",
+            "codex-cli 0.167.0",
+            "up to date",
+            0,
+        ),
+        (
+            false,
+            success,
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "updated (unknown -> 0.167.0",
+            0,
+        ),
+        (true, "", cleanup, "0", "codex-cli 0.167.0", "unverified", 1),
+        (
+            true,
+            "Codex CLI 0.168.0 installed successfully.",
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            true,
+            success,
+            cleanup,
+            "1",
+            "codex-cli 0.167.0",
+            "failed",
+            1,
+        ),
+        (
+            true,
+            success,
+            "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.<NL>Error: update failed",
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            false,
+            success,
+            "Error: update failed",
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            true,
+            success,
+            "WARNING: Could not install Codex.",
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            true,
+            "Codex CLI 0.167.0 not installed successfully.",
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (true, success, cleanup, "0", "unreadable", "unverified", 1),
+    ] {
+        let sb = TestSandbox::new();
+        let (_, codex_cfg) = setup_codex_standalone(&sb, "0.167.0");
+        if !initial_known {
+            fs::write(&codex_cfg, "version_stdout=unreadable\n").unwrap();
+        }
+        let payload = sb.root.join("installer.txt");
+        fs::write(&payload, if cfg!(windows) {
+            "# CODEX_INSTALL_DIR CODEX_HOME\nWrite-Host 'Codex CLI installed successfully'\n"
+        } else {
+            "#!/bin/sh\n# CODEX_INSTALL_DIR CODEX_HOME\necho 'Codex CLI installed successfully'\n"
+        }).unwrap();
+        sb.install_fake_tool("curl", &[("curl_payload_file", &payload.to_string_lossy())]);
+        let shell = if cfg!(windows) { "powershell" } else { "sh" };
+        sb.install_fake_tool(
+            shell,
+            &[
+                ("update_stdout", output),
+                ("update_stderr", diagnostics),
+                ("update_exit", exit),
+                ("next_version_stdout", after),
+                ("target_cfg_path", &codex_cfg.to_string_lossy()),
+            ],
+        );
+        let out = sb.run_teemiao(&["agents", "update", "codex"], &[&sb.bin_dir], &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{output}, {diagnostics}, {after}: {stdout}\n{stderr}"
+        );
+        assert!(stdout.contains(expected), "expected {expected}: {stdout}");
+        assert!(
+            stderr.contains(&diagnostics.replace("<NL>", "\n")),
+            "diagnostics must be retained: {stderr}"
+        );
+        assert!(
+            !stdout.contains("WARNING:"),
+            "warnings belong on stderr: {stdout}"
+        );
+    }
 }
 
 #[test]

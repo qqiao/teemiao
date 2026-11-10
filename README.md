@@ -13,7 +13,7 @@ Teemiao (`teemiao`) is a Rust command-line tool for generating Git build metadat
 | [CLI Reference (`docs/cli.md`)](docs/cli.md) | Command synopsis, verbosity flags (`-v`/`-q`), `build-info` positional syntax, JSON schema (`revision`, `build_time`), exit-status limitations, `config-template` status, and `en` / `zh-CN` localization rules. |
 | [AI Coding-Agent CLI Reference (`docs/agents.md`)](docs/agents.md) | Supported agent catalog (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`), ownership and channel verification, `--dry-run`, output streams, probe limits, exit codes, and troubleshooting. |
 | [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md) | Repository layout, local prerequisites, isolated fake-tool testing rules, required verification commands, CI matrix, and release-preparation checklist. |
-| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Release notes for `0.2.2`. |
+| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Release notes for `0.2.3`. |
 | [Quality Constraints (`CONSTRAINTS.md`)](CONSTRAINTS.md) | Mandatory quality, safety, process-containment, and verification floor. |
 
 ## Features
