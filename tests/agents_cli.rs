@@ -83,9 +83,12 @@ fn codex_standalone_release_markers_preserve_update_channels() {
         ("0.167.0", Some("0.167.0-x86_64-apple-darwin"), true),
         ("0.167.0", Some("0.167.0-aarch64-unknown-linux-musl"), true),
         ("0.167.0", Some("0.167.0-x86_64-unknown-linux-musl"), true),
+        ("0.167.0", Some("0.167.0-aarch64-unknown-linux-gnu"), true),
+        ("0.167.0", Some("0.167.0-x86_64-unknown-linux-gnu"), true),
         ("0.167.0", Some("0.167.0-x86_64-pc-windows-msvc"), true),
         ("0.167.0", Some("0.167.0-aarch64-pc-windows-msvc"), true),
         ("0.167.0", Some("0.167.0"), true),
+        ("0.167.0", Some("0.166.0-aarch64-apple-darwin"), false),
         ("0.167.0", None, false),
         ("0.167.0", Some(""), false),
         ("0.167.0", Some("not-a-version"), false),
@@ -134,6 +137,103 @@ fn codex_standalone_release_markers_preserve_update_channels() {
             "dry-run must only probe Codex: {:?}",
             sb.invocations()
         );
+    }
+}
+
+#[test]
+fn codex_standalone_current_manifest_must_match_update_marker() {
+    for (version, target, channel, automatic) in [
+        ("0.167.0", "aarch64-apple-darwin", "stable", true),
+        ("0.166.0", "aarch64-apple-darwin", "stable", false),
+        ("0.167.0", "x86_64-apple-darwin", "stable", false),
+        ("0.167.0", "aarch64-apple-darwin", "beta", false),
+    ] {
+        let sb = TestSandbox::new();
+        let (_, cfg) = setup_codex_standalone(&sb, "0.167.0");
+        // Exercise manifest evidence even when the active version probe fails.
+        fs::write(cfg, "version_stdout=unreadable\n").unwrap();
+        let standalone = sb.home.join(".codex/packages/standalone");
+        fs::write(
+            standalone.join("auto-update-version"),
+            "0.167.0-aarch64-apple-darwin",
+        )
+        .unwrap();
+        fs::create_dir_all(standalone.join("current")).unwrap();
+        fs::write(
+            standalone.join("current/codex-package.json"),
+            format!(r#"{{"version":"{version}","target":"{target}","channel":"{channel}"}}"#),
+        )
+        .unwrap();
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(if automatic { 0 } else { 1 }),
+            "{version}, {target}, {channel}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            !automatic,
+            "{stdout}"
+        );
+        assert!(
+            sb.invocations()
+                .iter()
+                .all(|line| line.starts_with("TOOL=codex|"))
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn codex_standalone_repointed_current_requires_matching_marker() {
+    let sb = TestSandbox::new();
+    let (launcher, _) = setup_codex_standalone(&sb, "0.167.0");
+    let original = fs::canonicalize(&launcher)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let standalone = sb.home.join(".codex/packages/standalone");
+    let selected = standalone.join("current");
+    let local_release = standalone.join("releases/local-custom-aarch64-apple-darwin");
+    sb.install_fake_tool_in(
+        &local_release.join("bin"),
+        "codex",
+        &[("version_stdout", "codex-cli 0.167.0")],
+    );
+    fs::copy(
+        original.join("codex-package.json"),
+        local_release.join("codex-package.json"),
+    )
+    .unwrap();
+    fs::remove_file(&launcher).unwrap();
+    std::os::unix::fs::symlink(selected.join("bin/codex"), &launcher).unwrap();
+    for (release, expected_code) in [(&original, 0), (&local_release, 1)] {
+        std::os::unix::fs::symlink(release, &selected).unwrap();
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(expected_code),
+            "{release:?}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            expected_code == 1,
+            "{stdout}"
+        );
+        fs::remove_file(&selected).unwrap();
     }
 }
 

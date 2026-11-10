@@ -7,6 +7,7 @@ All notable changes to `teemiao` are documented in this file.
 ### Fixed
 
 - Allow stable standalone Codex updates when the official installer records a platform suffix in its release name and update marker; continue requiring manual action for pinned, prerelease, or unreadable channel metadata.
+- Recognize GNU Linux package target suffixes and reject stale update markers after the selected Codex release changes, including replacement builds reporting the same version.
 - Recognize successful standalone Codex updates that emit known non-fatal cleanup warnings while retaining the warnings in diagnostics and preserving failure and version-verification checks.
 
 ### Packaging

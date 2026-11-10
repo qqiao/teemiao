@@ -2628,7 +2628,7 @@ fn determine_codex_owner(
             codex_home,
         } => {
             if is_non_default_channel_version(version)
-                || codex_standalone_is_pinned_or_prerelease(codex_home)
+                || codex_standalone_is_pinned_or_prerelease(codex_home, version)
             {
                 return UpdateOwner::ManualActionRequired {
                     reason: "standalone Codex installation is pinned or on a prerelease channel"
@@ -3945,12 +3945,14 @@ fn extract_codex_standalone_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-// Release names written by the official Unix and Windows standalone installers.
+// Official Codex package targets, including GNU builds used by packaged daemons.
 const CODEX_STANDALONE_TARGETS: &[&str] = &[
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
 ];
@@ -4025,7 +4027,10 @@ fn is_valid_codex_standalone_tree(
         || standalone_root.join("selection-history").is_file()
 }
 
-fn codex_standalone_is_pinned_or_prerelease(codex_home: &Path) -> bool {
+fn codex_standalone_is_pinned_or_prerelease(
+    codex_home: &Path,
+    active_version: Option<&str>,
+) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     let auto_update = standalone_root.join("auto-update-version");
     // Explicit --release installs remove this marker. Missing or unreadable
@@ -4039,15 +4044,37 @@ fn codex_standalone_is_pinned_or_prerelease(codex_home: &Path) -> bool {
         .find_map(|target| release_name.strip_suffix(target)?.strip_suffix('-'))
         .unwrap_or(release_name);
     // Strip only a known platform suffix, retaining any actual prerelease suffix.
-    if !is_valid_version_token(version) || is_non_default_channel_version(Some(version)) {
+    if !is_valid_version_token(version)
+        || is_non_default_channel_version(Some(version))
+        || active_version.is_some_and(|active| active != version)
+    {
         return true;
     }
-    let current_pkg = standalone_root.join("current").join("codex-package.json");
+    let current_dir = standalone_root.join("current");
+    // A manually repointed selection can retain a stale latest-channel marker,
+    // even when the replacement binary reports the same version and target.
+    if let Ok(selected) = fs::canonicalize(&current_dir)
+        && let Ok(root) = fs::canonicalize(&standalone_root)
+        && selected != root.join("current")
+        && fs::canonicalize(standalone_root.join("releases").join(release_name))
+            .ok()
+            .as_ref()
+            != Some(&selected)
+    {
+        return true;
+    }
+    let current_pkg = current_dir.join("codex-package.json");
     if let Ok(contents) = fs::read_to_string(current_pkg)
         && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
     {
         if let Some(ver) = val.get("version").and_then(|v| v.as_str())
-            && is_non_default_channel_version(Some(ver))
+            && parse_version_text(ver).as_deref() != Some(version)
+        {
+            return true;
+        }
+        if let Some(target) = val.get("target").and_then(|v| v.as_str())
+            && release_name != version
+            && release_name != format!("{version}-{target}")
         {
             return true;
         }
