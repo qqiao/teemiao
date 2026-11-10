@@ -2624,6 +2624,7 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
     for help_layout in [
         "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
         "Qoder CLI<NL>Usage:<NL>  qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+        "Qoder CLI<NL>Usage:<NL>  qodercli update<NL>Commands:<NL>  update  Update Qoder CLI",
         "Qoder CLI<NL>An AI coding assistant for your terminal.<NL>Usage: qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
     ] {
         let sb_arch = TestSandbox::new();
@@ -2681,6 +2682,31 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
             "qodercli",
             "1.2.3",
             "Acme CLI<NL>Commands:<NL>  update  Update CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Acme Code CLI helps you build projects.<NL>Usage: qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Qoder CLI<NL>Usage:<NL>  index-tool [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Qoder CLI<NL>Usage:<NL>  index-tool update<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Qoder CLI<NL>Usage:<NL>  index-tool --help<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Qoder CLI<NL>Usage:<NL>  qodercli [command]<NL>  index-tool update<NL>Commands:<NL>  update  Update Qoder CLI",
         ),
     ] {
         let sb_conf = TestSandbox::new();

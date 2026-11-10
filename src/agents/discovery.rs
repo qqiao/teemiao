@@ -958,69 +958,144 @@ fn extract_usage_program_stem(synopsis: &str) -> Option<&str> {
 }
 
 fn is_usage_synopsis_line(trimmed: &str) -> bool {
-    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
-        return false;
-    }
     let synopsis = strip_ascii_prefix_case_insensitive(trimmed, "or:")
         .map(str::trim)
         .unwrap_or(trimmed);
+    if synopsis.is_empty()
+        || synopsis.ends_with(['!', '?', ';', ','])
+        || (synopsis.ends_with('.') && !synopsis.ends_with("..."))
+        || [" - ", " — ", " – ", ": "]
+            .into_iter()
+            .any(|sep| synopsis.contains(sep))
+    {
+        return false;
+    }
     let mut tokens = synopsis.split_whitespace();
     let Some(first_token) = tokens.next() else {
         return false;
     };
-    if first_token.starts_with('[')
-        || first_token.starts_with('<')
-        || first_token.starts_with('(')
-        || first_token.starts_with('-')
-    {
+    if first_token.starts_with(['[', '<', '(', '{', '-']) {
         return true;
     }
-    if (synopsis.contains('[') && synopsis.contains(']'))
-        || (synopsis.contains('<') && synopsis.contains('>'))
-    {
+    if first_token.ends_with(':') {
+        return false;
+    }
+    let Some(stem) = extract_usage_program_stem(synopsis) else {
+        return false;
+    };
+    let rest: Vec<&str> = tokens.collect();
+    if rest.is_empty() {
         return true;
     }
-    if let Some(stem) = extract_usage_program_stem(synopsis)
-        && (stem.eq_ignore_ascii_case("qoder") || stem.eq_ignore_ascii_case("qodercli"))
-    {
-        return match tokens.next() {
-            None => true,
-            Some(second) => {
-                second.starts_with('[')
-                    || second.starts_with('<')
-                    || second.starts_with('(')
-                    || second.starts_with('-')
-                    || second.eq_ignore_ascii_case("update")
-                    || second.eq_ignore_ascii_case("command")
-                    || second.eq_ignore_ascii_case("subcommand")
-                    || second.eq_ignore_ascii_case("options")
-                    || second.eq_ignore_ascii_case("flags")
-                    || second.eq_ignore_ascii_case("args")
-            }
-        };
+    if rest.iter().any(|tok| {
+        tok.starts_with('-')
+            || tok.contains(['[', ']', '<', '>', '(', ')', '{', '}', '|', '=', '.'])
+    }) {
+        return true;
     }
-    false
+    !matches!(stem.to_ascii_lowercase().as_str(), "a" | "an" | "the")
+        && rest.iter().all(|tok| {
+            tok.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | ':'))
+        })
 }
 
-fn is_prose_function_word(lower_word: &str) -> bool {
+#[derive(Clone, Copy)]
+enum HelpLine<'a> {
+    UsageSynopsis(&'a str),
+    Preamble(&'a str),
+    Body(&'a str),
+}
+
+fn parse_help_lines(help_text: &str) -> Vec<HelpLine<'_>> {
+    let mut out = Vec::new();
+    let mut in_usage_block = false;
+    let mut usage_saw_synopsis = false;
+    let mut past_section_break = false;
+
+    for raw_line in help_text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            if in_usage_block && usage_saw_synopsis {
+                in_usage_block = false;
+            }
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if is_help_section_break(&lower) {
+            in_usage_block = false;
+            past_section_break = true;
+            continue;
+        }
+        if let Some(rest) = strip_ascii_prefix_case_insensitive(trimmed, "usage:") {
+            in_usage_block = true;
+            let rest_trimmed = rest.trim();
+            if !rest_trimmed.is_empty() {
+                usage_saw_synopsis = true;
+                out.push(HelpLine::UsageSynopsis(rest_trimmed));
+            } else {
+                usage_saw_synopsis = false;
+            }
+            continue;
+        }
+        if in_usage_block {
+            let is_indented = raw_line.starts_with(char::is_whitespace);
+            let is_or_line = strip_ascii_prefix_case_insensitive(trimmed, "or:").is_some();
+            if (!usage_saw_synopsis || is_indented || is_or_line) && is_usage_synopsis_line(trimmed)
+            {
+                usage_saw_synopsis = true;
+                out.push(HelpLine::UsageSynopsis(trimmed));
+                continue;
+            }
+            in_usage_block = false;
+        }
+        if !past_section_break {
+            out.push(HelpLine::Preamble(trimmed));
+        } else {
+            out.push(HelpLine::Body(trimmed));
+        }
+    }
+    out
+}
+
+fn is_banner_head_word(lower_word: &str) -> bool {
+    matches!(lower_word, "qoder" | "qodercli" | "cli" | "agent")
+}
+
+fn is_generic_description_noun_word(lower_word: &str) -> bool {
     matches!(
         lower_word,
         "a" | "an"
             | "the"
-            | "your"
-            | "our"
-            | "my"
-            | "their"
-            | "its"
-            | "this"
-            | "that"
-            | "these"
-            | "those"
-            | "all"
-            | "any"
-            | "each"
-            | "every"
-            | "some"
+            | "ai"
+            | "coding"
+            | "code"
+            | "cli"
+            | "agent"
+            | "assistant"
+            | "terminal"
+            | "interactive"
+            | "official"
+            | "local"
+            | "modern"
+            | "autonomous"
+            | "interface"
+            | "utility"
+            | "qoder"
+            | "qodercli"
+    )
+}
+
+fn is_phrase_boundary_word(lower_word: &str) -> bool {
+    matches!(
+        lower_word,
+        "a" | "an"
+            | "the"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
             | "for"
             | "in"
             | "on"
@@ -1032,145 +1107,20 @@ fn is_prose_function_word(lower_word: &str) -> bool {
             | "by"
             | "of"
             | "into"
-            | "onto"
-            | "upon"
-            | "within"
-            | "across"
-            | "through"
-            | "between"
-            | "among"
-            | "under"
-            | "over"
-            | "about"
             | "as"
             | "and"
             | "or"
-            | "but"
-            | "via"
-            | "is"
-            | "are"
-            | "was"
-            | "were"
-            | "be"
-            | "been"
-            | "being"
-            | "can"
-            | "will"
-            | "use"
-            | "used"
-            | "using"
-            | "run"
-            | "runs"
-            | "running"
-            | "manage"
-            | "manages"
-            | "managing"
-            | "build"
-            | "builds"
-            | "building"
-            | "create"
-            | "creates"
-            | "help"
-            | "helps"
-            | "helping"
-            | "allow"
-            | "allows"
-            | "enable"
-            | "enables"
-            | "provide"
-            | "provides"
-            | "support"
-            | "supports"
-            | "work"
-            | "works"
-            | "working"
-            | "interact"
-            | "chat"
-            | "edit"
-            | "write"
-            | "debug"
-            | "test"
-            | "deploy"
-            | "update"
-            | "upgrade"
-            | "install"
-            | "configure"
-            | "start"
-            | "launch"
-            | "powered"
-            | "designed"
-            | "built"
-            | "visit"
-            | "see"
-            | "read"
-            | "learn"
+            | "that"
+            | "which"
+            | "your"
+            | "our"
+            | "my"
+            | "their"
+            | "its"
+            | "this"
+            | "these"
+            | "those"
     )
-}
-
-fn is_cli_descriptive_term(lower_word: &str) -> bool {
-    matches!(
-        lower_word,
-        "assistant"
-            | "terminal"
-            | "interactive"
-            | "shell"
-            | "workflow"
-            | "workflows"
-            | "developer"
-            | "developers"
-            | "software"
-            | "engineering"
-            | "task"
-            | "tasks"
-            | "project"
-            | "projects"
-            | "utility"
-            | "interface"
-            | "environment"
-            | "session"
-            | "sessions"
-            | "local"
-            | "modern"
-            | "smart"
-            | "intelligent"
-            | "official"
-            | "autonomous"
-            | "documentation"
-    )
-}
-
-fn is_descriptive_help_line(trimmed: &str) -> bool {
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("http://") || lower.contains("https://") {
-        return true;
-    }
-    let words: Vec<&str> = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
-        .collect();
-    if words.len() < 2 {
-        return false;
-    }
-    let ends_with_sentence_punct = (trimmed.ends_with('.')
-        && trimmed.split_whitespace().last().is_some_and(|tok| {
-            let core = tok.trim_end_matches('.');
-            !core.is_empty()
-                && !is_version_or_build_token(core)
-                && core.chars().all(|c| c.is_ascii_alphabetic())
-        }))
-        || trimmed.ends_with('!')
-        || trimmed.ends_with('?');
-    if ends_with_sentence_punct && words.len() >= 3 {
-        return true;
-    }
-    if words.iter().any(|w| is_prose_function_word(w)) {
-        return true;
-    }
-    words.len() >= 3
-        && words.iter().any(|w| is_cli_descriptive_term(w))
-        && words
-            .iter()
-            .all(|w| is_cli_descriptive_term(w) || !has_conflicting_non_qoder_product(w))
 }
 
 fn is_conflicting_banner_segment(segment: &str) -> bool {
@@ -1179,174 +1129,193 @@ fn is_conflicting_banner_segment(segment: &str) -> bool {
     !lower.contains("qoder") || has_conflicting_non_qoder_product(trimmed)
 }
 
-fn descriptive_line_has_conflicting_brand(trimmed: &str) -> bool {
-    let lower = trimmed.to_ascii_lowercase();
-    for sep in [" is ", " are "] {
-        if let Some(idx) = lower.find(sep) {
-            let subject = trimmed[..idx].trim();
-            if !subject.is_empty()
-                && !is_descriptive_help_line(subject)
-                && is_conflicting_banner_segment(subject)
-            {
-                return true;
-            }
-        }
-    }
-    let words: Vec<&str> = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
-        .collect();
-    for (idx, pair) in words.windows(2).enumerate() {
-        let (prev, curr) = (pair[0], pair[1]);
-        if matches!(curr, "qoder" | "qodercli")
-            && !matches!(prev, "qoder" | "qodercli")
-            && !is_prose_function_word(prev)
-            && !is_cli_descriptive_term(prev)
-        {
-            return true;
-        }
-        if idx == 0
-            && matches!(curr, "cli" | "agent")
-            && !matches!(prev, "qoder" | "qodercli" | "ai" | "coding" | "code")
-            && !is_prose_function_word(prev)
-            && !is_cli_descriptive_term(prev)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn help_has_conflicting_usage_program(help_text: &str) -> bool {
-    let mut in_usage_block = false;
-    let mut usage_saw_synopsis = false;
-
-    for raw_line in help_text.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            if in_usage_block && usage_saw_synopsis {
-                in_usage_block = false;
-            }
-            continue;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if is_help_section_break(&lower) {
-            in_usage_block = false;
-            continue;
-        }
-        if let Some(rest) = strip_ascii_prefix_case_insensitive(trimmed, "usage:") {
-            in_usage_block = true;
-            let rest_trimmed = rest.trim();
-            usage_saw_synopsis = !rest_trimmed.is_empty();
-            if let Some(stem) = extract_usage_program_stem(rest_trimmed)
-                && !stem.eq_ignore_ascii_case("qoder")
-                && !stem.eq_ignore_ascii_case("qodercli")
-            {
-                return true;
-            }
-            continue;
-        }
-        if in_usage_block {
-            let is_indented = raw_line.starts_with(char::is_whitespace);
-            let is_continuation = (!usage_saw_synopsis && !is_descriptive_help_line(trimmed))
-                || (is_indented && is_usage_synopsis_line(trimmed));
-            if is_continuation {
-                usage_saw_synopsis = true;
-                if let Some(stem) = extract_usage_program_stem(trimmed)
-                    && !stem.eq_ignore_ascii_case("qoder")
-                    && !stem.eq_ignore_ascii_case("qodercli")
-                {
-                    return true;
-                }
-                continue;
-            }
-            in_usage_block = false;
-        }
-    }
-    false
-}
-
-fn help_has_conflicting_product_banner(help_text: &str) -> bool {
-    let mut in_usage_block = false;
-    let mut usage_saw_synopsis = false;
-
-    for raw_line in help_text.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            if in_usage_block && usage_saw_synopsis {
-                in_usage_block = false;
-            }
-            continue;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if is_help_section_break(&lower) {
-            break;
-        }
-        if let Some(rest) = strip_ascii_prefix_case_insensitive(trimmed, "usage:") {
-            in_usage_block = true;
-            usage_saw_synopsis = !rest.trim().is_empty();
-            continue;
-        }
-        if in_usage_block {
-            let is_indented = raw_line.starts_with(char::is_whitespace);
-            if (!usage_saw_synopsis && is_usage_synopsis_line(trimmed))
-                || (is_indented && is_usage_synopsis_line(trimmed))
-            {
-                usage_saw_synopsis = true;
-                continue;
-            }
-            in_usage_block = false;
-        }
-        if lower.starts_with("error:")
-            || lower.starts_with("fatal:")
-            || lower.starts_with("warning:")
-            || lower.starts_with("note:")
-            || lower.starts_with('-')
-            || lower.starts_with('*')
-            || line_negates_or_rejects_update(&lower)
-        {
-            continue;
-        }
-        if !lower.contains("http://") && !lower.contains("https://") {
-            let split_sep = [" - ", " — ", " – ", ": "]
-                .into_iter()
-                .find_map(|sep| trimmed.split_once(sep));
-            if let Some((left, right)) = split_sep {
-                let left_trimmed = left.trim();
-                let right_trimmed = right.trim();
-                if !left_trimmed.is_empty() && !is_descriptive_help_line(left_trimmed) {
-                    if is_conflicting_banner_segment(left_trimmed)
-                        || descriptive_line_has_conflicting_brand(right_trimmed)
+fn description_has_conflicting_brand(desc: &str) -> bool {
+    for clause in desc.split(['.', '!', '?', ';', ',', ':', '(', ')']) {
+        let words: Vec<&str> = clause
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        for (idx, word) in words.iter().enumerate() {
+            let lower = word.to_ascii_lowercase();
+            if is_banner_head_word(&lower) {
+                let mut j = idx;
+                while j > 0 {
+                    let prev = words[j - 1];
+                    let prev_lower = prev.to_ascii_lowercase();
+                    if is_phrase_boundary_word(&prev_lower) {
+                        break;
+                    }
+                    if has_conflicting_non_qoder_product(prev)
+                        && !is_generic_description_noun_word(&prev_lower)
                     {
                         return true;
                     }
-                    continue;
+                    j -= 1;
                 }
             }
-        }
-        if is_descriptive_help_line(trimmed) {
-            if descriptive_line_has_conflicting_brand(trimmed) {
-                return true;
-            }
-            continue;
-        }
-        if is_conflicting_banner_segment(trimmed) {
-            return true;
         }
     }
     false
 }
 
+fn is_unbranded_description_line(trimmed: &str) -> bool {
+    let words: Vec<&str> = trimmed
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let Some(&first) = words.first() else {
+        return false;
+    };
+    if !matches!(first.to_ascii_lowercase().as_str(), "a" | "an" | "the") {
+        return false;
+    }
+    let Some(head_idx) = words.iter().position(|w| {
+        matches!(
+            w.to_ascii_lowercase().as_str(),
+            "assistant" | "agent" | "cli" | "interface" | "utility"
+        )
+    }) else {
+        return false;
+    };
+    head_idx >= 1
+        && words[..=head_idx]
+            .iter()
+            .all(|w| is_generic_description_noun_word(&w.to_ascii_lowercase()))
+        && !description_has_conflicting_brand(trimmed)
+}
+
+fn ends_with_sentence_punctuation(trimmed: &str) -> bool {
+    if trimmed.ends_with(['!', '?']) {
+        return true;
+    }
+    if trimmed.ends_with('.') && !trimmed.ends_with("...") {
+        return trimmed.split_whitespace().last().is_some_and(|tok| {
+            let core = tok.trim_end_matches('.');
+            !core.is_empty()
+                && !is_version_or_build_token(core)
+                && core.chars().all(|c| c.is_ascii_alphabetic())
+        });
+    }
+    false
+}
+
+fn split_sentence_banner_and_description(trimmed: &str) -> (&str, Option<&str>) {
+    let mut tokens = Vec::new();
+    let mut byte_idx = 0;
+    for raw_tok in trimmed.split_whitespace() {
+        let start = trimmed[byte_idx..]
+            .find(raw_tok)
+            .map(|off| byte_idx + off)
+            .unwrap_or(byte_idx);
+        let end = start + raw_tok.len();
+        byte_idx = end;
+        tokens.push((raw_tok, end));
+    }
+    let token_has_banner_head = |raw_tok: &str| {
+        raw_tok
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| is_banner_head_word(&w.to_ascii_lowercase()))
+    };
+    let Some(first_head_idx) = tokens
+        .iter()
+        .position(|(tok, _)| token_has_banner_head(tok))
+    else {
+        return (trimmed, None);
+    };
+    let mut last_banner_idx = first_head_idx;
+    for (idx, (tok, _)) in tokens.iter().enumerate().skip(first_head_idx + 1) {
+        if !has_conflicting_non_qoder_product(tok) || token_has_banner_head(tok) {
+            last_banner_idx = idx;
+        } else if idx + 1 < tokens.len() && token_has_banner_head(tokens[idx + 1].0) {
+            last_banner_idx = idx + 1;
+        } else {
+            break;
+        }
+    }
+    let banner_end = tokens[last_banner_idx].1;
+    let banner = trimmed[..banner_end].trim();
+    let rest = trimmed[banner_end..].trim();
+    if rest.is_empty() {
+        (banner, None)
+    } else {
+        (banner, Some(rest))
+    }
+}
+
+fn preamble_line_has_conflicting_banner(trimmed: &str) -> bool {
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("error:")
+        || lower.starts_with("fatal:")
+        || lower.starts_with("warning:")
+        || lower.starts_with("note:")
+        || lower.starts_with('-')
+        || lower.starts_with('*')
+        || line_negates_or_rejects_update(&lower)
+    {
+        return false;
+    }
+    if !lower.contains("http://") && !lower.contains("https://") {
+        let split_sep = [" - ", " — ", " – ", ": "]
+            .into_iter()
+            .find_map(|sep| trimmed.split_once(sep));
+        if let Some((left, right)) = split_sep {
+            let banner = left.trim();
+            let description = right.trim();
+            if !banner.is_empty() {
+                return is_conflicting_banner_segment(banner)
+                    || description_has_conflicting_brand(description);
+            }
+        }
+    }
+    if is_unbranded_description_line(trimmed) {
+        return false;
+    }
+    if ends_with_sentence_punctuation(trimmed) {
+        let (banner, description) = split_sentence_banner_and_description(trimmed);
+        return is_conflicting_banner_segment(banner)
+            || description.is_some_and(description_has_conflicting_brand);
+    }
+    is_conflicting_banner_segment(trimmed)
+}
+
+fn help_lines_have_conflicting_usage_program(lines: &[HelpLine<'_>]) -> bool {
+    lines.iter().any(|line| match line {
+        HelpLine::UsageSynopsis(synopsis) => {
+            extract_usage_program_stem(synopsis).is_some_and(|stem| {
+                !stem.eq_ignore_ascii_case("qoder") && !stem.eq_ignore_ascii_case("qodercli")
+            })
+        }
+        _ => false,
+    })
+}
+
+fn help_lines_have_conflicting_product_banner(lines: &[HelpLine<'_>]) -> bool {
+    lines.iter().any(|line| match line {
+        HelpLine::Preamble(trimmed) => preamble_line_has_conflicting_banner(trimmed),
+        _ => false,
+    })
+}
+
+fn help_has_conflicting_usage_program(help_text: &str) -> bool {
+    help_lines_have_conflicting_usage_program(&parse_help_lines(help_text))
+}
+
+fn help_has_conflicting_product_banner(help_text: &str) -> bool {
+    help_lines_have_conflicting_product_banner(&parse_help_lines(help_text))
+}
+
 fn help_has_qoder_cli_evidence(help_text: &str) -> bool {
+    let parsed_lines = parse_help_lines(help_text);
     if has_qoder_desktop_or_ide_signature(help_text)
-        || help_has_conflicting_usage_program(help_text)
-        || help_has_conflicting_product_banner(help_text)
+        || help_lines_have_conflicting_usage_program(&parsed_lines)
+        || help_lines_have_conflicting_product_banner(&parsed_lines)
     {
         return false;
     }
     let lower = help_text.to_ascii_lowercase();
     version_has_qoder_cli_branding(&lower)
-        || (lower.contains("qoder") && help_supports_qoder_native_update(help_text))
+        || (lower.contains("qoder")
+            && help_lines_support_qoder_native_update(help_text, &parsed_lines))
 }
 
 fn line_negates_or_rejects_update(lower_line: &str) -> bool {
@@ -1428,12 +1397,17 @@ fn description_targets_unrelated_artifact(lower_desc: &str) -> bool {
 }
 
 fn help_supports_qoder_native_update(help_text: &str) -> bool {
+    let parsed_lines = parse_help_lines(help_text);
     if has_qoder_desktop_or_ide_signature(help_text)
-        || help_has_conflicting_usage_program(help_text)
-        || help_has_conflicting_product_banner(help_text)
+        || help_lines_have_conflicting_usage_program(&parsed_lines)
+        || help_lines_have_conflicting_product_banner(&parsed_lines)
     {
         return false;
     }
+    help_lines_support_qoder_native_update(help_text, &parsed_lines)
+}
+
+fn help_lines_support_qoder_native_update(help_text: &str, parsed_lines: &[HelpLine<'_>]) -> bool {
     let full_lower = help_text.to_ascii_lowercase();
     if !full_lower.contains("qoder") {
         return false;
@@ -1455,65 +1429,68 @@ fn help_supports_qoder_native_update(help_text: &str) -> bool {
         }
     }
 
-    for raw_line in help_text.lines() {
-        let lower = raw_line.trim().to_ascii_lowercase();
-        if lower.is_empty() {
-            continue;
-        }
-        if let Some(usage_rest) = lower.strip_prefix("usage:") {
-            let tokens: Vec<&str> = usage_rest.split_whitespace().collect();
-            if tokens.len() >= 2
-                && matches!(tokens[0], "qodercli" | "qoder")
-                && tokens[1] == "update"
-                && tokens.get(2).is_none_or(|t| !is_prose_auxiliary_token(t))
-            {
-                return true;
-            }
-            continue;
-        }
-
-        let entry = lower
-            .strip_prefix("- ")
-            .or_else(|| lower.strip_prefix("* "))
-            .unwrap_or(&lower)
-            .trim_start();
-
-        for prefix in ["qodercli update", "qoder update"] {
-            if let Some(rest) = entry.strip_prefix(prefix)
-                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-            {
-                let rest_trimmed = rest.trim();
-                let first_rest = rest_trimmed.split_whitespace().next().unwrap_or("");
-                if !is_prose_auxiliary_token(first_rest)
-                    && !description_targets_unrelated_artifact(rest_trimmed)
+    for &line in parsed_lines {
+        match line {
+            HelpLine::UsageSynopsis(synopsis) => {
+                let syn_clean = strip_ascii_prefix_case_insensitive(synopsis, "or:")
+                    .map(str::trim)
+                    .unwrap_or(synopsis)
+                    .to_ascii_lowercase();
+                let tokens: Vec<&str> = syn_clean.split_whitespace().collect();
+                if tokens.len() >= 2
+                    && matches!(tokens[0], "qodercli" | "qoder")
+                    && tokens[1] == "update"
+                    && tokens.get(2).is_none_or(|t| !is_prose_auxiliary_token(t))
                 {
                     return true;
                 }
             }
-        }
+            HelpLine::Preamble(trimmed) | HelpLine::Body(trimmed) => {
+                let lower = trimmed.to_ascii_lowercase();
+                let entry = lower
+                    .strip_prefix("- ")
+                    .or_else(|| lower.strip_prefix("* "))
+                    .unwrap_or(&lower)
+                    .trim_start();
 
-        let mut tokens = entry.split_whitespace();
-        if let Some(first) = tokens.next() {
-            let cleaned = first.trim_matches(|c: char| matches!(c, ',' | ':' | '|'));
-            if cleaned == "update" {
-                let rest_tokens: Vec<&str> = tokens.collect();
-                if rest_tokens
-                    .first()
-                    .is_some_and(|t| is_prose_auxiliary_token(t))
-                {
-                    continue;
+                for prefix in ["qodercli update", "qoder update"] {
+                    if let Some(rest) = entry.strip_prefix(prefix)
+                        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                    {
+                        let rest_trimmed = rest.trim();
+                        let first_rest = rest_trimmed.split_whitespace().next().unwrap_or("");
+                        if !is_prose_auxiliary_token(first_rest)
+                            && !description_targets_unrelated_artifact(rest_trimmed)
+                        {
+                            return true;
+                        }
+                    }
                 }
-                let rest_joined = rest_tokens.join(" ");
-                if description_targets_unrelated_artifact(&rest_joined) {
-                    continue;
-                }
-                let desc_has_positive_update_target = rest_joined.contains("qoder")
-                    || rest_joined.contains("cli")
-                    || rest_joined.contains("self")
-                    || rest_joined.contains("latest")
-                    || rest_joined.contains("version");
-                if has_cli_branding || desc_has_positive_update_target {
-                    return true;
+
+                let mut tokens = entry.split_whitespace();
+                if let Some(first) = tokens.next() {
+                    let cleaned = first.trim_matches(|c: char| matches!(c, ',' | ':' | '|'));
+                    if cleaned == "update" {
+                        let rest_tokens: Vec<&str> = tokens.collect();
+                        if rest_tokens
+                            .first()
+                            .is_some_and(|t| is_prose_auxiliary_token(t))
+                        {
+                            continue;
+                        }
+                        let rest_joined = rest_tokens.join(" ");
+                        if description_targets_unrelated_artifact(&rest_joined) {
+                            continue;
+                        }
+                        let desc_has_positive_update_target = rest_joined.contains("qoder")
+                            || rest_joined.contains("cli")
+                            || rest_joined.contains("self")
+                            || rest_joined.contains("latest")
+                            || rest_joined.contains("version");
+                        if has_cli_branding || desc_has_positive_update_target {
+                            return true;
+                        }
+                    }
                 }
             }
         }

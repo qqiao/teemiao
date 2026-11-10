@@ -4826,24 +4826,48 @@ fn main() -> ExitCode {
         }
 
         // 13. Help structure vs product branding:
-        // - Valid multiline `Usage:\n  qodercli [command]` and description paragraphs
+        // - Valid multiline `Usage:\n  qodercli [command]`, `Usage:\n  qodercli update`, and description paragraphs
         //   (`An AI coding assistant for your terminal.`) must be accepted as NativeSelfUpdate.
         // - Conflicting CLI branding in `--help` (`Acme Qoder CLI` for shared `qoder`, `Acme CLI` for `qodercli`,
-        //   or multiline `Usage:\n  index-tool [command]`) must be rejected.
-        for valid_help_layout in [
-            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
-            "Qoder CLI\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
-            "Qoder CLI\nAn AI coding assistant for your terminal.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
-            "Qoder CLI\nAn AI coding assistant for your terminal.\n\nUsage:\n  qodercli [command]\n  qodercli [options]\n\nCommands:\n  update  Update Qoder CLI",
-            "Qoder CLI - An AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
-            "Qoder CLI is an AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+        //   `Acme Code CLI helps you build projects.`, or multiline `Usage:` with foreign programs like
+        //   `index-tool [command]`, `index-tool update`, `index-tool --help`, or a second synopsis `index-tool update`)
+        //   must be rejected.
+        for (ver_text, valid_help_layout) in [
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  qodercli update\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nAn AI coding assistant for your terminal.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nAn AI coding assistant for your terminal.\n\nUsage:\n  qodercli [command]\n  qodercli [options]\n\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI - An AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                "Qoder CLI 0.9.0",
+                "Qoder CLI is an AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
         ] {
             let runner_valid_help = FakeProcessRunner::new(
                 move |req| {
                     if req.args.iter().any(|a| a == "--help") {
                         Ok(ok_output(valid_help_layout))
                     } else {
-                        Ok(ok_output("Qoder CLI 0.9.0"))
+                        Ok(ok_output(ver_text))
                     }
                 },
                 |_| unreachable!(),
@@ -4884,8 +4908,38 @@ fn main() -> ExitCode {
             ),
             (
                 &env_both,
+                "1.2.3",
+                "Acme Code CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
                 "Qoder CLI 0.9.0",
+                "Acme Qoder CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "The Acme Code CLI helps you build projects.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
                 "Qoder CLI\nUsage:\n  index-tool [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  index-tool update\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  index-tool --help\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
+                "Qoder CLI\nUsage:\n  qodercli [command]\n  index-tool update\nCommands:\n  update  Update Qoder CLI",
             ),
         ] {
             let runner_conflicting_help = FakeProcessRunner::new(
