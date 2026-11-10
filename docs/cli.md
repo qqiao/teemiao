@@ -86,7 +86,7 @@ No additional fields (such as branch names, tags, compiler versions, or dirty-tr
 ### Operational Requirements and Limitations
 
 1. **Repository-root invocation (`cwd`):** Teemiao opens the Git repository at the canonicalized current working directory using `gix::open(&cwd)`. It does **not** search parent directories (`gix::discover` is not used). Run `teemiao build-info` from the directory containing `.git`.
-2. **Valid `HEAD` commit required:** The repository's `HEAD` reference must resolve to an existing commit ID. Running in an recién-initialized repository with an unborn `HEAD` fails with `Head ID not found` (or a reference lookup error).
+2. **Valid `HEAD` commit required:** The repository's `HEAD` reference must resolve to an existing commit ID. Running in a newly initialized repository with an unborn `HEAD` fails with `Head ID not found` (or a reference lookup error).
 3. **Existing parent directory required:** Teemiao opens `[FILE]` with `std::fs::File::create`. If the parent directory of `[FILE]` does not exist, file creation fails with an I/O error; missing parent directories are not created automatically.
 4. **Overwrite behavior:** If `[FILE]` already exists, `std::fs::File::create` truncates and overwrites it.
 5. **Exit code `0` on generation errors (current limitation):** In `src/main.rs`, if `build_info.run()` returns an error, Teemiao prints `Error generating build info: <error>` (`生成构建信息时出错：<error>` in `zh-CN`) to `stderr` and **still returns exit code `0` (`ExitCode::SUCCESS`)**. Build scripts and CI pipelines must verify that the target JSON file exists (or remove any stale file beforehand and check `stderr`) instead of relying only on the process exit code.

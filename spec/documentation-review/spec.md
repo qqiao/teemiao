@@ -2,7 +2,7 @@
 
 **Issue:** QQ-10 — Documentation review
 
-**Status:** Approved for implementation; independent review corrections pending
+**Status:** Independent review accepted; awaiting human acceptance (T007)
 
 Qian Qiao approved this specification, plan, and task package in QQ-10 comment
 `01a1c666-6298-7a14-bd34-e3bff5f26445` on 2026-11-10 (UTC):
@@ -136,6 +136,6 @@ environmental failures honestly; CI pending is not a local test failure.
 - Never weaken tests, execute real agent installers/updaters, change credentials,
   invent historical approvals, publish the crate, push a release tag, or merge.
 
-Implementation approval is recorded above. Leader-owned design artifacts and
-final independent code/test/security review remain with the leader; final human
-acceptance follows resolution of the review findings.
+Implementation approval is recorded above. The leader's independent review is
+complete, with verification recorded in tasks.md. Final human acceptance remains
+T007; publication, release tags, and merge are outside this delivery's scope.

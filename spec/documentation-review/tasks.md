@@ -28,7 +28,7 @@ package; the coder may append evidence without changing requirements or sequence
   Verify: commands match CI/constraints, help remains localized, Rust doc build,
   reviewed diff proves unchanged runtime behavior. Dependency: T002.
 
-- [ ] **Checkpoint — Documentation coverage and examples** (Coder/Leader).
+- [x] **Checkpoint — Documentation coverage and examples** (Coder/Leader).
   All tracked documentation groups have a disposition; limitations are explicit;
   links and examples are checked. Leader resolves any design/history questions.
   Dependency: T003.
@@ -49,7 +49,7 @@ package; the coder may append evidence without changing requirements or sequence
   Verify: complete spec command list after committing intended changes; record
   results and four required self-reviews. Dependency: T004.
 
-- [ ] **T006 — Independent leader review and PR delivery** (Leader/Coder).
+- [x] **T006 — Independent leader review and PR delivery** (Leader/Coder).
   Leader reviews requirements, diff, tests, safety, packaging, and audit coverage;
   leader corrects historical design status only when supported by evidence.
   Coder resolves findings to the same standards. Create/update one PR to main.
@@ -57,8 +57,8 @@ package; the coder may append evidence without changing requirements or sequence
   verification results recorded. Verify: reviewed diff, targeted reproductions,
   PR and issue evidence. Dependency: T005.
   First review: `fcc8c4e24e07d9da103360be1875e77f61c750f3`; changes requested.
-  The documentation checkpoint and T006 remain open until the findings below
-  are corrected and independently rechecked.
+  Re-review: both findings resolved in `664e4e359933c649725f2fac8ebfb6fddb046d2f`;
+  independent acceptance and verification are recorded below.
 
 - [ ] **T007 — Human acceptance** (Qian Qiao).
   Review the leader-validated PR and address feedback before closure.
@@ -77,7 +77,7 @@ package; the coder may append evidence without changing requirements or sequence
 ## Independent leader review (2026-11-11)
 
 Reviewed `fcc8c4e24e07d9da103360be1875e77f61c750f3` against `bae5920`.
-Two required documentation findings remain:
+The first review requested two documentation corrections (resolved below):
 
 1. `docs/agents.md:171` incorrectly says project-local `node_modules/.bin`
    directories are ignored. A disposable Codex npm fixture there is discovered
@@ -107,6 +107,37 @@ the production diff is limited to comments, static help, metadata, and version.
 Leader annotations now record QQ-10's existing implementation approval and
 QQ-9's independently verified final review and human acceptance. QQ-8's actual
 record already checks T001 and T008; its T009 is left unchanged.
+
+## Independent re-review acceptance (2026-11-11)
+
+T006 accepted at `664e4e359933c649725f2fac8ebfb6fddb046d2f`; both required
+findings are resolved. The project-local Codex fixture is discovered with manual
+update guidance, and the audit now matches the actual baseline, historical
+checklists, constraints, tracked research, and approved requirement IDs.
+The PR description reflects those corrections. Minor audit symbol references
+and a CLI-guide wording typo were corrected with the acceptance record.
+
+The leader independently reran the disposable checks: both help locales,
+build-info paths/schema/overwrite/error behavior, empty PATH, and project-local
+Codex list/dry-run results pass. All 30 relative links/fragments resolve, all 14
+baseline README headings remain, and all 33 bundled skill files are accounted
+for. Diff hygiene passes.
+
+`cargo publish --dry-run --locked --registry crates-io` independently succeeded
+on the clean reviewed commit: 69 files packaged, archive compiled and verified,
+no missing-metadata warning, and upload aborted as expected for a dry-run.
+This supersedes the first review's coder-only publish verification limitation.
+
+Source, locales, tests, Cargo.toml, Cargo.lock, and CONSTRAINTS.md are byte-for-byte
+identical to independently tested `fcc8c4e`; its 39-unit/28-integration-test,
+formatting, strict-Clippy, build, rustdoc, metadata, and version results remain
+applicable. The follow-up changed documentation only, so the unchanged suite
+was not repeated. The coder also reports all checks passing on `664e4e3`.
+
+At the re-review snapshot, [CI run 42868478667](https://github.com/qqiao/teemiao/actions/runs/42868478667)
+had passed Ubuntu; macOS and Windows were still running. No unresolved material
+findings remain. [PR #27](https://github.com/qqiao/teemiao/pull/27) is ready for
+T007 human acceptance; no merge, release tag, or publication was performed.
 
 ## Resolution of Independent Review Findings (Coder)
 

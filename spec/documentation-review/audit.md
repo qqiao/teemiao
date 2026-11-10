@@ -3,7 +3,7 @@
 - **Feature**: `documentation-review` (`QQ-10`)
 - **Baseline**: `main` at `bae5920599a572e3ee728a5f75bce6279536ad2d` (`0.2.1`)
 - **Target Version**: `0.2.2`
-- **Status**: Implemented (awaiting independent Leader re-review `T006` and Human acceptance `T007`)
+- **Status**: Independently reviewed and accepted (T006); awaiting human acceptance (T007)
 
 ---
 
@@ -24,8 +24,8 @@ Every tracked documentation surface in the repository (`git ls-files`) was audit
 | `locales/zh-CN.yml` | `corrected` | Applied paired Simplified Chinese updates for `commands.build_info.long_about`, `commands.config_template.about`, `commands.config_template.long_about`, and `commands.agents.list.long_about` matching `locales/en.yml`. |
 | `src/main.rs` | `corrected` | Updated `Commands::ConfigTemplate` doc comment (`src/main.rs:73`) to note `(currently not implemented; invoking it panics)`. Verified crate-level and locale-detection rustdoc comments (`src/main.rs:15-140`) match implementation and pass `cargo doc --locked --no-deps`. |
 | `src/build_info/mod.rs` | `corrected` | Updated `BuildInfoCommand` rustdoc comment (`src/build_info/mod.rs:52-58`) to describe the exact `revision` and `build_time` JSON fields and repository/parent-directory prerequisites. |
-| `src/agents/mod.rs` | `accurate` | Audited module and type docstrings (`AgentId`, `AgentsCommand`, `AgentsSubcommand`, `UpdateArgs`, `AgentSpec`, `CATALOG`) against `clap` attributes and catalog behavior; all 7 agents, aliases, and value help strings are accurate. |
-| `src/agents/discovery.rs` | `accurate` | Audited module and function docstrings (`PROBE_TIMEOUT`, `MAX_PROBE_BYTES`, `PROBE_ENV_OVERRIDES`, ownership classification, `is_local_node_modules_bin_launcher`, Cursor disambiguation, Codex/Claude/OpenCode/Kimi/Qoder detection) against runtime implementation. |
+| `src/agents/mod.rs` | `accurate` | Audited module and type docstrings (`AgentId`, `AgentsCommand`, `AgentsSubcommand`, `UpdateArgs`, `AgentId::ALL`, `AgentId::cli_candidates`) against `clap` attributes and catalog behavior; all 7 agents, aliases, and value help strings are accurate. |
+| `src/agents/discovery.rs` | `accurate` | Audited module and function docstrings (`PROBE_TIMEOUT`, `PROBE_MAX_OUTPUT_BYTES`, `PROBE_ENV_OVERRIDES`, ownership classification, `is_local_node_modules_bin_launcher`, Cursor disambiguation, Codex/Claude/OpenCode/Kimi/Qoder detection) against runtime implementation. |
 | `src/agents/update.rs` | `accurate` | Audited module and function docstrings (sequential updates, `--dry-run`, exit code precedence `130` > `1` > `0`, post-update verification) against runtime implementation. |
 | `tests/agents_cli.rs` | `corrected` | Updated CLI version assertion at `tests/agents_cli.rs:86` from `"teemiao 0.2.1"` to `"teemiao 0.2.2"` (`FR-008`). All 28 integration tests pass. |
 | `tests/support/mod.rs` | `accurate` | Audited test sandbox documentation (`TestSandbox`, fake executable generation, isolated `HOME`/`APPDATA`/`LOCALAPPDATA` environment overrides). |
@@ -88,7 +88,7 @@ Executed locally on macOS (`Darwin arm64`, `rustc 1.99.1`, `cargo 1.99.1`):
 9. `cargo run --locked -- build-info --help` -> exit `0` (verified in both `LC_ALL=en_US.UTF-8` and `LC_ALL=zh_CN.UTF-8`)
 10. `cargo run --locked -- agents update --help` -> exit `0` (verified in both `LC_ALL=en_US.UTF-8` and `LC_ALL=zh_CN.UTF-8`; also verified `config-template --help`, `agents --help`, and `agents list --help`)
 11. `cargo package --list --locked` -> exit `0` (69 packaged files including `Cargo.toml`, `Cargo.lock`, `LICENSE`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `docs/cli.md`, `docs/agents.md`, `locales/en.yml`, `locales/zh-CN.yml`, `src/**`, and `tests/**`; 0 missing-metadata warnings)
-12. `cargo publish --dry-run --locked` -> on this host, `~/.cargo/config.toml` replaces `crates-io` with the non-remote-registry mirror `aliyun`, so bare `cargo publish --dry-run --locked` exits `101` with `error: crates-io is replaced with non-remote-registry source registry aliyun; include --registry crates-io to use crates.io`. Running `cargo publish --dry-run --locked --registry crates-io` exits `0`, packaging 69 files (`1.1MiB` / `314.6KiB` compressed) and verifying/compiling `target/package/teemiao-0.2.2` cleanly with 0 missing-metadata warnings (`warning: aborting upload due to dry run`).
+12. `cargo publish --dry-run --locked` -> on this host, `~/.cargo/config.toml` replaces `crates-io` with the non-remote-registry mirror `aliyun`, so bare `cargo publish --dry-run --locked` exits `101` with `error: crates-io is replaced with non-remote-registry source registry aliyun; include --registry crates-io to use crates.io`. Running `cargo publish --dry-run --locked --registry crates-io` exits `0`, packaging 69 files and verifying/compiling `target/package/teemiao-0.2.2` cleanly with 0 missing-metadata warnings (`warning: aborting upload due to dry run`).
 13. `git diff --check` -> exit `0` (no whitespace or conflict marker issues)
 
 ### Isolated Disposable Sandbox Verification
