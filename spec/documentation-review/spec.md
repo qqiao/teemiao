@@ -2,7 +2,11 @@
 
 **Issue:** QQ-10 — Documentation review
 
-**Status:** Draft; awaiting human approval of this specification, plan, and tasks
+**Status:** Approved for implementation; independent review corrections pending
+
+Qian Qiao approved this specification, plan, and task package in QQ-10 comment
+`01a1c666-6298-7a14-bd34-e3bff5f26445` on 2026-11-10 (UTC):
+"Approved, please proceed". Final acceptance remains T007.
 
 **Date:** 2026-11-11
 
@@ -132,7 +136,6 @@ environmental failures honestly; CI pending is not a local test failure.
 - Never weaken tests, execute real agent installers/updaters, change credentials,
   invent historical approvals, publish the crate, push a release tag, or merge.
 
-No additional product questions are needed for this draft. Per the squad workflow,
-Qian Qiao reviews the complete package and explicitly authorizes implementation
-before the leader dispatches the coder. Leader-owned design artifacts and final
-independent code/test/security review remain with the leader.
+Implementation approval is recorded above. Leader-owned design artifacts and
+final independent code/test/security review remain with the leader; final human
+acceptance follows resolution of the review findings.

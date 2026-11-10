@@ -1,12 +1,14 @@
 # Tasks: documentation and package metadata
 
-**Issue:** QQ-10. All implementation tasks await T001. The leader owns this
+**Issue:** QQ-10. T001 is approved. The leader owns this
 package; the coder may append evidence without changing requirements or sequence.
 
-- [ ] **T001 — Approve the complete review package** (Qian Qiao).
+- [x] **T001 — Approve the complete review package** (Qian Qiao).
   Review spec.md, plan.md, this checklist, and existing CONSTRAINTS.md.
   Acceptance: explicit approval of scope, behavior-preservation boundary, and
   `0.2.2` target. Verify: approval comment on QQ-10. Dependency: none.
+  Evidence: Qian Qiao's "Approved, please proceed" in QQ-10 comment
+  `01a1c666-6298-7a14-bd34-e3bff5f26445` (2026-11-10 UTC).
 
 - [x] **T002 [US1] — Document the actual user workflows** (Coder; medium).
   Audit README against CLI/source; produce linked CLI and agents references.
@@ -54,6 +56,9 @@ package; the coder may append evidence without changing requirements or sequence
   Acceptance: no unresolved material findings; exact reviewed commit and actual
   verification results recorded. Verify: reviewed diff, targeted reproductions,
   PR and issue evidence. Dependency: T005.
+  First review: `fcc8c4e24e07d9da103360be1875e77f61c750f3`; changes requested.
+  The documentation checkpoint and T006 remain open until the findings below
+  are corrected and independently rechecked.
 
 - [ ] **T007 — Human acceptance** (Qian Qiao).
   Review the leader-validated PR and address feedback before closure.
@@ -68,3 +73,37 @@ package; the coder may append evidence without changing requirements or sequence
 - **T003**: Created `CONTRIBUTING.md` and `spec/documentation-review/audit.md` covering every tracked documentation surface (`corrected`, `accurate`, `historical`, `externally maintained`). Refined help strings in `locales/en.yml` and `locales/zh-CN.yml` and doc comments in `src/main.rs` and `src/build_info/mod.rs` without changing runtime behavior. Flagged historical `spec/agent-improvements/{spec.md,plan.md,tasks.md}` and `spec/agents/tasks.md` status/checkbox items in `audit.md` Section 2 for Leader annotation.
 - **T004**: Updated `Cargo.toml` with `description`, `repository`, `documentation`, `readme`, `keywords`, and `categories`. Confirmed `cargo metadata --locked --no-deps --format-version 1`, `cargo package --list --locked`, and `cargo publish --dry-run --locked` succeed without missing-metadata warnings.
 - **T005**: Applied TDD (`tests/agents_cli.rs:86` RED -> `Cargo.toml` & `Cargo.lock` `0.2.2` bump -> GREEN), added `CHANGELOG.md` for `0.2.2` (prepared, unpublished), completed all four required self-review gates (`code-review-and-quality`, `code-simplification`, `security-and-hardening`, `performance-optimization`), and verified the full 13-command verification list in `spec.md`.
+
+## Independent leader review (2026-11-11)
+
+Reviewed `fcc8c4e24e07d9da103360be1875e77f61c750f3` against `bae5920`.
+Two required documentation findings remain:
+
+1. `docs/agents.md:171` incorrectly says project-local `node_modules/.bin`
+   directories are ignored. A disposable Codex npm fixture there is discovered
+   and listed with manual-action guidance; targeted dry-run exits 1. Correct
+   the discovery-versus-update distinction without changing runtime behavior.
+2. `audit.md` describes a nonexistent README baseline, historical task IDs and
+   checkbox states, and success-criterion IDs absent from the approved spec.
+   It also omits tracked `spec/agents/research.md`. Reconcile the inventory and
+   evidence against the actual base and reviewed files, including the claimed
+   legacy anchors and the exact publish command used. Update matching PR claims.
+
+Independent checks passed on macOS arm64 with rustc/cargo 1.99.1: formatting,
+strict Clippy, 39 unit plus 28 integration tests, locked build, rustdoc, metadata,
+version `0.2.2`, package listing (69 files, required assets present, no missing
+metadata warning), and diff hygiene. Disposable checks verified both help
+locales, empty PATH, build-info paths/schema/overwrite/errors, and the local npm
+finding. All 30 relative links/fragments in the user guides resolve locally.
+The registry's [README renderer](https://github.com/rust-lang/crates.io/blob/main/crates/crates_io_markdown/src/lib.rs)
+rewrites these repository-relative links to GitHub `blob/HEAD` destinations;
+the new files become available there after merge. Full publish dry-run was
+reported by the coder and was not repeated in this review.
+
+[CI run 42864820518](https://github.com/qqiao/teemiao/actions/runs/42864820518)
+passed on macOS, Ubuntu, and Windows for the reviewed implementation commit.
+Runtime logic, dependencies, and quality constraints are unchanged by this PR;
+the production diff is limited to comments, static help, metadata, and version.
+Leader annotations now record QQ-10's existing implementation approval and
+QQ-9's independently verified final review and human acceptance. QQ-8's actual
+record already checks T001 and T008; its T009 is left unchanged.
