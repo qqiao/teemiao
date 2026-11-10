@@ -17,14 +17,15 @@
 
 use crate::agents::discovery::{
     DiscoveredAgent, DiscoveryEnv, PackageManagerCache, UpdateOwner, discover_agent,
-    is_unsafe_windows_cmd_shim, paths_refer_to_same_dir, resolve_executable_on_path,
+    is_unsafe_windows_batch_command, paths_refer_to_same_dir, resolve_executable_on_path,
 };
-use crate::agents::{AgentId, ProcessOutput, ProcessRequest, ProcessRunner};
+use crate::agents::{AgentId, ProcessError, ProcessOutput, ProcessRequest, ProcessRunner};
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Fixed official HTTPS URL for the Unix (macOS / Linux) Codex standalone installer.
 pub const CODEX_UNIX_INSTALLER_URL: &str = "https://chatgpt.com/codex/install.sh";
@@ -34,6 +35,7 @@ pub const CODEX_WINDOWS_INSTALLER_URL: &str = "https://chatgpt.com/codex/install
 
 /// Maximum bytes captured per stream (stdout/stderr) during an update execution.
 pub const UPDATE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_INSTALLER_SCRIPT_BYTES: u64 = 1024 * 1024;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -329,11 +331,11 @@ pub fn execute_agent_update(
                 };
             }
 
-            if env.is_windows && is_unsafe_windows_cmd_shim(&program) {
+            if env.is_windows && is_unsafe_windows_batch_command(&program, &args) {
                 return AgentUpdateResult {
                     id: agent.id,
                     outcome: UpdateOutcome::ManualActionRequired {
-                        reason: "updater shim path on Windows contains unsafe shell metacharacters"
+                        reason: "updater batch path or arguments on Windows contain unsafe shell metacharacters"
                             .to_string(),
                         guidance:
                             "Reinstall the updater or package manager in a path without cmd.exe metacharacters."
@@ -351,7 +353,7 @@ pub fn execute_agent_update(
                 max_output_bytes: UPDATE_MAX_OUTPUT_BYTES,
             };
 
-            match runner.run_update(&request) {
+            match run_checked_update(&request, runner) {
                 Ok(output) => {
                     let outcome = evaluate_post_update(agent, &output, env, runner, cache);
                     AgentUpdateResult {
@@ -480,23 +482,33 @@ fn execute_codex_standalone_update(
     let download_request = ProcessRequest {
         program: curl_bin,
         args: vec![
+            // Must be first: prevent ~/.curlrc from weakening TLS or changing outputs.
+            OsString::from("-q"),
             OsString::from("--fail"),
             OsString::from("--silent"),
             OsString::from("--show-error"),
             OsString::from("--location"),
             OsString::from("--proto"),
             OsString::from("=https"),
+            OsString::from("--proto-redir"),
+            OsString::from("=https"),
             OsString::from("--tlsv1.2"),
+            OsString::from("--max-filesize"),
+            OsString::from(MAX_INSTALLER_SCRIPT_BYTES.to_string()),
+            OsString::from("--connect-timeout"),
+            OsString::from("15"),
+            OsString::from("--max-time"),
+            OsString::from("120"),
             OsString::from("-o"),
             script_path.as_os_str().to_os_string(),
             OsString::from(installer_url),
         ],
         env_overrides: Vec::new(),
-        timeout: None,
+        timeout: Some(Duration::from_secs(125)),
         max_output_bytes: UPDATE_MAX_OUTPUT_BYTES,
     };
 
-    let download_output = match runner.run_update(&download_request) {
+    let download_output = match run_checked_update(&download_request, runner) {
         Ok(out) => out,
         Err(err) => {
             return UpdateOutcome::Failed {
@@ -561,7 +573,7 @@ fn execute_codex_standalone_update(
         max_output_bytes: UPDATE_MAX_OUTPUT_BYTES,
     };
 
-    match runner.run_update(&install_request) {
+    match run_checked_update(&install_request, runner) {
         Ok(install_output) => evaluate_post_update(agent, &install_output, env, runner, cache),
         Err(err) => UpdateOutcome::Failed {
             reason: format!("failed to execute Codex standalone installer: {err}"),
@@ -569,6 +581,14 @@ fn execute_codex_standalone_update(
             diagnostics: download_diag,
         },
     }
+}
+
+fn run_checked_update(
+    request: &ProcessRequest,
+    runner: &dyn ProcessRunner,
+) -> Result<ProcessOutput, ProcessError> {
+    request.validate_batch_command()?;
+    runner.run_update(request)
 }
 
 fn validate_downloaded_codex_installer(script_path: &Path, is_windows: bool) -> Result<(), String> {
@@ -581,7 +601,19 @@ fn validate_downloaded_codex_installer(script_path: &Path, is_windows: bool) -> 
         return Err("downloaded installer path is not a regular file".to_string());
     }
 
-    let bytes = fs::read(script_path).map_err(|e| format!("could not read installer ({e})"))?;
+    if sym_meta.len() > MAX_INSTALLER_SCRIPT_BYTES {
+        return Err("downloaded installer exceeds the 1 MiB size limit".to_string());
+    }
+    let file =
+        fs::File::open(script_path).map_err(|e| format!("could not open installer ({e})"))?;
+    // Bound the read too, even if the file grew after the metadata check.
+    let mut bytes = Vec::new();
+    file.take(MAX_INSTALLER_SCRIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("could not read installer ({e})"))?;
+    if bytes.len() as u64 > MAX_INSTALLER_SCRIPT_BYTES {
+        return Err("downloaded installer exceeds the 1 MiB size limit".to_string());
+    }
     if bytes.is_empty() {
         return Err("downloaded installer file is empty".to_string());
     }
@@ -639,12 +671,11 @@ fn resolve_codex_installer_interpreter(
         ];
         Ok((ps, args))
     } else {
-        let sh = resolve_executable_on_path("sh", env)
-            .map(|(p, _)| p)
-            .or_else(|| {
-                let bin_sh = PathBuf::from("/bin/sh");
-                bin_sh.is_file().then_some(bin_sh)
-            })
+        let bin_sh = PathBuf::from("/bin/sh");
+        let sh = bin_sh
+            .is_file()
+            .then_some(bin_sh)
+            .or_else(|| resolve_executable_on_path("sh", env).map(|(p, _)| p))
             .ok_or_else(|| "'sh' was not found to run the Codex Unix installer".to_string())?;
         let args = vec![script_path.as_os_str().to_os_string()];
         Ok((sh, args))
@@ -709,6 +740,14 @@ fn evaluate_post_update(
         String::from_utf8_lossy(&output.stderr)
     );
     let diagnostics = format_process_diagnostics(output);
+
+    if output.timed_out || output.stdout_truncated || output.stderr_truncated {
+        return UpdateOutcome::Unverified {
+            reason: "updater output is incomplete (execution/output collection timed out or output exceeded its size limit)".to_string(),
+            path: before_agent.launcher_path.clone(),
+            diagnostics,
+        };
+    }
 
     if let Some((reason, guidance)) = detect_manual_only_updater_output(&combined_output) {
         return UpdateOutcome::ManualActionRequired {
@@ -1347,5 +1386,118 @@ fn format_process_diagnostics(output: &ProcessOutput) -> Option<String> {
         (false, true) => Some(stderr),
         (true, false) => Some(stdout),
         (false, false) => Some(format!("{stderr}\n{stdout}")),
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::agents::RealProcessRunner;
+
+    struct NeverRun;
+    impl ProcessRunner for NeverRun {
+        fn run_probe(&self, _: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+            panic!("unsafe request must not probe")
+        }
+        fn run_update(&self, _: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+            panic!("unsafe request must not update")
+        }
+    }
+
+    #[test]
+    fn security_every_update_request_checks_batch_arguments() {
+        for program in [
+            "curl.cmd",
+            "powershell.bat",
+            "pwsh.cmd",
+            "npm.cmd",
+            "winget.cmd",
+        ] {
+            for (path, arg) in [
+                (PathBuf::from(program), "temp%USERNAME%/installer"),
+                (PathBuf::from("Dir & Evil").join(program), "safe"),
+            ] {
+                let request = ProcessRequest {
+                    program: path,
+                    args: vec![arg.into()],
+                    env_overrides: vec![],
+                    timeout: None,
+                    max_output_bytes: 1024,
+                };
+                assert!(run_checked_update(&request, &NeverRun).is_err());
+                let Err(ProcessError::Io { source, .. }) =
+                    RealProcessRunner::new().run_update(&request)
+                else {
+                    panic!("real runner accepted unsafe batch command");
+                };
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+            }
+        }
+    }
+
+    #[test]
+    fn security_incomplete_updater_output_cannot_confirm_success() {
+        let agent = DiscoveredAgent {
+            id: AgentId::Codex,
+            version: Some("0.167.0".into()),
+            launcher_path: PathBuf::from("missing/codex"),
+            resolved_path: PathBuf::from("missing/codex"),
+            owner: UpdateOwner::WinGet {
+                winget_program: PathBuf::from("winget.exe"),
+                package_id: "OpenAI.Codex".into(),
+            },
+            warnings: vec![],
+        };
+        let env = DiscoveryEnv {
+            path: OsString::new(),
+            pathext: None,
+            home_dir: None,
+            local_app_data: None,
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            is_windows: false,
+        };
+        for (timed_out, stdout_truncated, stderr_truncated) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let output = ProcessOutput {
+                status_code: Some(0),
+                success: !timed_out,
+                interrupted: false,
+                timed_out,
+                stdout: b"Already up to date".to_vec(),
+                stderr: vec![],
+                stdout_truncated,
+                stderr_truncated,
+            };
+            let outcome = evaluate_post_update(
+                &agent,
+                &output,
+                &env,
+                &NeverRun,
+                &mut PackageManagerCache::new(),
+            );
+            assert!(
+                matches!(outcome, UpdateOutcome::Unverified { ref reason, .. } if reason.contains("incomplete")),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn security_installer_size_is_bounded() {
+        let temp = TempInstallerDir::create().unwrap();
+        let path = temp.dir.join("installer.sh");
+        let mut content =
+            b"#!/bin/sh\n# CODEX_HOME CODEX_INSTALL_DIR installed successfully\n".to_vec();
+        content.resize(1024 * 1024 + 1, b' ');
+        fs::write(&path, &content).unwrap();
+        assert!(validate_downloaded_codex_installer(&path, false).is_err());
+        content.pop();
+        fs::write(&path, &content).unwrap();
+        assert!(validate_downloaded_codex_installer(&path, false).is_ok());
     }
 }

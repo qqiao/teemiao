@@ -539,7 +539,7 @@ fn path_has_cursor_evidence(path: &Path) -> bool {
         }
         for candidate_dir in [Some(parent), parent.parent()].into_iter().flatten() {
             let pkg_json = candidate_dir.join("package.json");
-            if let Ok(contents) = fs::read_to_string(pkg_json)
+            if let Ok(contents) = read_discovery_metadata(pkg_json)
                 && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
                 && let Some(name) = val.get("name").and_then(|n| n.as_str())
                 && matches!(
@@ -2024,6 +2024,7 @@ pub fn run_bounded_probe(
         timeout: Some(PROBE_TIMEOUT),
         max_output_bytes: PROBE_MAX_OUTPUT_BYTES,
     };
+    request.validate_batch_command()?;
     runner.run_probe(&request)
 }
 
@@ -2315,16 +2316,28 @@ pub fn canonicalize_clean(path: &Path) -> PathBuf {
 /// Checks if a path is a Windows `.cmd` or `.bat` shim containing `cmd.exe`
 /// injection metacharacters (`&`, `|`, `<`, `>`, `^`, `%`, `!`, `\r`, `\n`).
 pub fn is_unsafe_windows_cmd_shim(path: &Path) -> bool {
+    is_unsafe_windows_batch_command(path, &[])
+}
+
+/// Batch files reparse arguments through cmd.exe, including `%*` forwarding.
+/// Reject expansion/control characters rather than relying on CRT quoting.
+pub fn is_unsafe_windows_batch_command(path: &Path, args: &[OsString]) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
     if !ext.eq_ignore_ascii_case("cmd") && !ext.eq_ignore_ascii_case("bat") {
         return false;
     }
-    let path_str = path.to_string_lossy();
-    path_str
-        .chars()
-        .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%' | '!' | '\r' | '\n'))
+    std::iter::once(path.as_os_str())
+        .chain(args.iter().map(OsString::as_os_str))
+        .any(|value| {
+            value.as_encoded_bytes().iter().any(|c| {
+                matches!(
+                    c,
+                    b'&' | b'|' | b'<' | b'>' | b'^' | b'%' | b'!' | b'\r' | b'\n' | b'"'
+                )
+            })
+        })
 }
 
 // --- Ownership classification ---
@@ -2439,8 +2452,7 @@ fn determine_kimi_owner(
 
 fn is_legacy_kimi_wrapper(launcher_path: &Path, resolved_path: &Path) -> bool {
     for path in [launcher_path, resolved_path] {
-        if let Ok(bytes) = fs::read(path) {
-            let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+        if let Some(sample) = read_text_wrapper_sample(path) {
             let lower = sample.to_ascii_lowercase();
             if lower.contains("kimi-legacy") || lower.contains("no-self-upgrade") {
                 return true;
@@ -2628,10 +2640,15 @@ fn determine_codex_owner(
             codex_home,
         } => {
             if is_non_default_channel_version(version)
-                || codex_standalone_is_pinned_or_prerelease(codex_home, version)
+                || codex_standalone_is_pinned_or_prerelease(
+                    codex_home,
+                    version,
+                    launcher_path,
+                    resolved_path,
+                )
             {
                 return UpdateOwner::ManualActionRequired {
-                    reason: "standalone Codex installation is pinned or on a prerelease channel"
+                    reason: "standalone Codex installation is pinned, on a prerelease channel, or its active selection could not be verified"
                         .to_string(),
                     guidance: "Run the official Codex installer with '--release <version>' manually to preserve your pinned or prerelease channel.".to_string(),
                 };
@@ -3079,7 +3096,7 @@ fn verify_package_json_name_and_version(
     active_version: Option<&str>,
 ) -> bool {
     let pkg_json_path = pkg_root.join("package.json");
-    let Ok(contents) = fs::read_to_string(pkg_json_path) else {
+    let Ok(contents) = read_discovery_metadata(pkg_json_path) else {
         return false;
     };
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -3113,7 +3130,7 @@ fn verify_package_json_entrypoint(
     is_windows: bool,
 ) -> bool {
     let pkg_json_path = pkg_root.join("package.json");
-    let Ok(contents) = fs::read_to_string(pkg_json_path) else {
+    let Ok(contents) = read_discovery_metadata(pkg_json_path) else {
         return false;
     };
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -3199,7 +3216,7 @@ fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
             pkg_root = pkg_root.join(part);
         }
         let pkg_json = pkg_root.join("package.json");
-        if let Ok(contents) = fs::read_to_string(pkg_json)
+        if let Ok(contents) = read_discovery_metadata(pkg_json)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
             && let Some(ver) = val.get("version").and_then(|v| v.as_str())
             && is_non_default_channel_version(Some(ver))
@@ -3210,12 +3227,41 @@ fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
     false
 }
 
+// Ownership evidence comes from small manifests/markers, never arbitrary-sized files.
+fn read_discovery_metadata(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+    let path = path.as_ref();
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_METADATA_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "ownership metadata is not a regular file within the size limit",
+        ));
+    }
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_METADATA_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "ownership metadata exceeds the size limit",
+        ));
+    }
+    Ok(text)
+}
+
 fn read_text_wrapper_sample(launcher_path: &Path) -> Option<String> {
     use std::io::Read;
+    let metadata = fs::metadata(launcher_path).ok()?;
+    if !metadata.is_file() || metadata.len() > 8192 {
+        return None;
+    }
     let file = fs::File::open(launcher_path).ok()?;
     let mut bytes = Vec::with_capacity(8192);
-    file.take(8192).read_to_end(&mut bytes).ok()?;
-    if bytes.contains(&0) {
+    file.take(8193).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 8192 || bytes.contains(&0) {
         return None;
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -4004,7 +4050,7 @@ fn is_valid_codex_standalone_tree(
     }
     let pkg_json = release_dir.join("codex-package.json");
     if pkg_json.is_file() {
-        let Ok(contents) = fs::read_to_string(&pkg_json) else {
+        let Ok(contents) = read_discovery_metadata(&pkg_json) else {
             return false;
         };
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -4030,12 +4076,14 @@ fn is_valid_codex_standalone_tree(
 fn codex_standalone_is_pinned_or_prerelease(
     codex_home: &Path,
     active_version: Option<&str>,
+    launcher_path: &Path,
+    resolved_path: &Path,
 ) -> bool {
     let standalone_root = codex_home.join("packages").join("standalone");
     let auto_update = standalone_root.join("auto-update-version");
     // Explicit --release installs remove this marker. Missing or unreadable
     // metadata must not opt a pinned installation back into the latest channel.
-    let Ok(contents) = fs::read_to_string(&auto_update) else {
+    let Ok(contents) = read_discovery_metadata(&auto_update) else {
         return true;
     };
     let release_name = contents.trim();
@@ -4046,44 +4094,71 @@ fn codex_standalone_is_pinned_or_prerelease(
     // Strip only a known platform suffix, retaining any actual prerelease suffix.
     if !is_valid_version_token(version)
         || is_non_default_channel_version(Some(version))
-        || active_version.is_some_and(|active| active != version)
+        || active_version != Some(version)
     {
         return true;
     }
     let current_dir = standalone_root.join("current");
-    // A manually repointed selection can retain a stale latest-channel marker,
-    // even when the replacement binary reports the same version and target.
-    if let Ok(selected) = fs::canonicalize(&current_dir)
-        && let Ok(root) = fs::canonicalize(&standalone_root)
-        && selected != root.join("current")
-        && fs::canonicalize(standalone_root.join("releases").join(release_name))
-            .ok()
-            .as_ref()
-            != Some(&selected)
+    // Selection metadata must exist and agree with the executable actually invoked.
+    let Ok(selected) = fs::canonicalize(&current_dir) else {
+        return true;
+    };
+    let marker_release = standalone_root.join("releases").join(release_name);
+    match fs::symlink_metadata(&marker_release) {
+        Ok(_) => {
+            if fs::canonicalize(&marker_release).ok().as_ref() != Some(&selected) {
+                return true;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Legacy/copied layouts may use a real current directory without releases/.
+            if fs::canonicalize(&standalone_root)
+                .ok()
+                .map(|root| root.join("current"))
+                != Some(selected.clone())
+            {
+                return true;
+            }
+        }
+        Err(_) => return true,
+    }
+    let wrapper_target = extract_verified_wrapper_exec_target(launcher_path);
+    for path in [
+        Some(resolved_path),
+        Some(launcher_path),
+        wrapper_target.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some((_, active_dir)) = extract_codex_standalone_root(path)
+            && fs::canonicalize(active_dir).ok().as_ref() != Some(&selected)
+        {
+            return true;
+        }
+    }
+    // The selected directory is also the active directory for symlinks/wrappers.
+    // Copied Windows launchers additionally require a successful matching probe above.
+    let Ok(contents) = read_discovery_metadata(current_dir.join("codex-package.json")) else {
+        return true;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return true;
+    };
+    if val.get("version").and_then(|v| v.as_str()) != Some(version) {
+        return true;
+    }
+    if let Some(target) = val.get("target").and_then(|v| v.as_str())
+        && release_name != version
+        && release_name != format!("{version}-{target}")
     {
         return true;
     }
-    let current_pkg = current_dir.join("codex-package.json");
-    if let Ok(contents) = fs::read_to_string(current_pkg)
-        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents)
+    if let Some(channel) = val.get("channel").and_then(|c| c.as_str())
+        && !channel.eq_ignore_ascii_case("latest")
+        && !channel.eq_ignore_ascii_case("stable")
     {
-        if let Some(ver) = val.get("version").and_then(|v| v.as_str())
-            && parse_version_text(ver).as_deref() != Some(version)
-        {
-            return true;
-        }
-        if let Some(target) = val.get("target").and_then(|v| v.as_str())
-            && release_name != version
-            && release_name != format!("{version}-{target}")
-        {
-            return true;
-        }
-        if let Some(channel) = val.get("channel").and_then(|c| c.as_str())
-            && !channel.eq_ignore_ascii_case("latest")
-            && !channel.eq_ignore_ascii_case("stable")
-        {
-            return true;
-        }
+        return true;
     }
     false
 }

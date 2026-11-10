@@ -2219,6 +2219,7 @@ dependencies = [
  "clap-verbosity-flag",
  "env_logger",
  "gix",
+ "libc",
  "log",
  "rust-i18n",
  "serde",

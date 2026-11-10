@@ -10,9 +10,18 @@ All notable changes to `teemiao` are documented in this file.
 - Recognize GNU Linux package target suffixes and reject stale update markers after the selected Codex release changes, including replacement builds reporting the same version.
 - Recognize successful standalone Codex updates that emit known non-fatal cleanup warnings while retaining the warnings in diagnostics and preserving failure and version-verification checks.
 
+### Security
+
+- Validate Windows batch-command arguments at every subprocess boundary, including WinGet probes and Codex installer tools.
+- Require a verified Codex version and agreement between the active launcher, current selection, manifest, and automatic-update marker.
+- Isolate installer downloads from curl configuration, restrict redirects to HTTPS, bound download time and script size, and prefer the system POSIX shell.
+- Bound post-exit output collection, reject incomplete updater evidence, and terminate timed Unix process groups without spawning an external kill command.
+- Bound ownership metadata reads and reject oversized wrapper files instead of accepting incomplete evidence.
+- Document the repository security review and dependency audit, including the remaining unmaintained localization dependency and pending CI hardening patch.
+
 ### Packaging
 
-- Prepare patch version `0.2.3` without changing dependency versions. Publication and release tagging remain pending maintainer approval.
+- Prepare patch version `0.2.3` without changing dependency versions. Declare the already-locked `libc` directly on Unix for process-group termination. Publication and release tagging remain pending maintainer approval.
 
 ## [0.2.2] — Unreleased (Prepared)
 

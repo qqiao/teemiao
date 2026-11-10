@@ -29,32 +29,39 @@ fn setup_codex_standalone(
     } else {
         "aarch64-apple-darwin"
     };
-    let release_name = format!("{version}-{target}");
-    let release_dir = sb
-        .home
-        .join(".codex")
-        .join("packages")
-        .join("standalone")
-        .join("releases")
-        .join(&release_name);
+    setup_codex_standalone_target(sb, version, target)
+}
+
+fn setup_codex_standalone_target(
+    sb: &TestSandbox,
+    version: &str,
+    target: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let release_name = if target.is_empty() {
+        version.to_string()
+    } else {
+        format!("{version}-{target}")
+    };
+    let standalone = sb.home.join(".codex/packages/standalone");
+    let release_dir = if cfg!(unix) {
+        standalone.join("releases").join(&release_name)
+    } else {
+        standalone.join("current")
+    };
     fs::create_dir_all(&release_dir).unwrap();
     fs::write(
         release_dir.join("codex-package.json"),
         format!(r#"{{"layoutVersion":1,"version":"{version}","target":"{target}"}}"#),
     )
     .unwrap();
-    fs::write(
-        release_dir
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("auto-update-version"),
-        &release_name,
-    )
-    .unwrap();
+    fs::write(standalone.join("auto-update-version"), &release_name).unwrap();
     #[cfg(unix)]
     {
+        let current = standalone.join("current");
+        if fs::symlink_metadata(&current).is_ok() {
+            fs::remove_file(&current).unwrap();
+        }
+        std::os::unix::fs::symlink(&release_dir, current).unwrap();
         let release_bin_dir = release_dir.join("bin");
         let (target_bin, cfg_path) = sb.install_fake_tool_in(
             &release_bin_dir,
@@ -73,6 +80,17 @@ fn setup_codex_standalone(
             "codex",
             &[("version_stdout", &format!("codex-cli {version}"))],
         )
+    }
+}
+
+fn write_unix_installer_fixture(sb: &TestSandbox, payload: &std::path::Path, tool: &str) {
+    if cfg!(unix) {
+        let executable = sb
+            .bin_dir
+            .join(tool)
+            .to_string_lossy()
+            .replace('\'', "'\"'\"'");
+        fs::write(payload, format!("#!/bin/sh\n# CODEX_HOME CODEX_INSTALL_DIR installed successfully\nexec '{executable}' \"$@\"\n")).unwrap();
     }
 }
 
@@ -105,7 +123,17 @@ fn codex_standalone_release_markers_preserve_update_channels() {
         ),
     ] {
         let sb = TestSandbox::new();
-        setup_codex_standalone(&sb, version);
+        if automatic {
+            let suffix = marker
+                .unwrap()
+                .trim()
+                .strip_prefix(version)
+                .unwrap()
+                .trim_start_matches('-');
+            setup_codex_standalone_target(&sb, version, suffix);
+        } else {
+            setup_codex_standalone(&sb, version);
+        }
         let marker_path = sb
             .home
             .join(".codex/packages/standalone/auto-update-version");
@@ -149,9 +177,7 @@ fn codex_standalone_current_manifest_must_match_update_marker() {
         ("0.167.0", "aarch64-apple-darwin", "beta", false),
     ] {
         let sb = TestSandbox::new();
-        let (_, cfg) = setup_codex_standalone(&sb, "0.167.0");
-        // Exercise manifest evidence even when the active version probe fails.
-        fs::write(cfg, "version_stdout=unreadable\n").unwrap();
+        setup_codex_standalone_target(&sb, "0.167.0", "aarch64-apple-darwin");
         let standalone = sb.home.join(".codex/packages/standalone");
         fs::write(
             standalone.join("auto-update-version"),
@@ -215,6 +241,7 @@ fn codex_standalone_repointed_current_requires_matching_marker() {
     .unwrap();
     fs::remove_file(&launcher).unwrap();
     std::os::unix::fs::symlink(selected.join("bin/codex"), &launcher).unwrap();
+    fs::remove_file(&selected).unwrap();
     for (release, expected_code) in [(&original, 0), (&local_release, 1)] {
         std::os::unix::fs::symlink(release, &selected).unwrap();
         let out = sb.run_teemiao(
@@ -822,8 +849,8 @@ fn codex_standalone_cleanup_warnings_require_verified_success() {
             cleanup,
             "0",
             "codex-cli 0.167.0",
-            "updated (unknown -> 0.167.0",
-            0,
+            "manual action required",
+            1,
         ),
         (true, "", cleanup, "0", "codex-cli 0.167.0", "unverified", 1),
         (
@@ -859,7 +886,7 @@ fn codex_standalone_cleanup_warnings_require_verified_success() {
             "Error: update failed",
             "0",
             "codex-cli 0.167.0",
-            "unverified",
+            "manual action required",
             1,
         ),
         (
@@ -894,7 +921,11 @@ fn codex_standalone_cleanup_warnings_require_verified_success() {
             "#!/bin/sh\n# CODEX_INSTALL_DIR CODEX_HOME\necho 'Codex CLI installed successfully'\n"
         }).unwrap();
         sb.install_fake_tool("curl", &[("curl_payload_file", &payload.to_string_lossy())]);
-        let shell = if cfg!(windows) { "powershell" } else { "sh" };
+        let shell = if cfg!(windows) {
+            "powershell"
+        } else {
+            "fixture-installer"
+        };
         sb.install_fake_tool(
             shell,
             &[
@@ -905,6 +936,7 @@ fn codex_standalone_cleanup_warnings_require_verified_success() {
                 ("target_cfg_path", &codex_cfg.to_string_lossy()),
             ],
         );
+        write_unix_installer_fixture(&sb, &payload, shell);
         let out = sb.run_teemiao(&["agents", "update", "codex"], &[&sb.bin_dir], &[]);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -914,10 +946,19 @@ fn codex_standalone_cleanup_warnings_require_verified_success() {
             "{output}, {diagnostics}, {after}: {stdout}\n{stderr}"
         );
         assert!(stdout.contains(expected), "expected {expected}: {stdout}");
-        assert!(
-            stderr.contains(&diagnostics.replace("<NL>", "\n")),
-            "diagnostics must be retained: {stderr}"
-        );
+        if initial_known {
+            assert!(
+                stderr.contains(&diagnostics.replace("<NL>", "\n")),
+                "diagnostics must be retained: {stderr}"
+            );
+        } else {
+            assert!(
+                sb.invocations()
+                    .iter()
+                    .all(|line| line.starts_with("TOOL=codex|")),
+                "an unknown active version must prevent installer execution"
+            );
+        }
         assert!(
             !stdout.contains("WARNING:"),
             "warnings belong on stderr: {stdout}"
@@ -950,13 +991,27 @@ fn agents_update_codex_standalone_positive_and_negative_validation() {
         "curl",
         &[("curl_payload_file", &valid_payload.to_string_lossy())],
     );
-    let shell_tool = if cfg!(windows) { "powershell" } else { "sh" };
+    let shell_tool = if cfg!(windows) {
+        "powershell"
+    } else {
+        "fixture-installer"
+    };
     sb.install_fake_tool(
         shell_tool,
         &[
             ("next_version_stdout", "codex-cli 0.119.0"),
             ("target_cfg_path", &codex_cfg.to_string_lossy()),
             ("update_stdout", "Installed Codex 0.119.0"),
+        ],
+    );
+
+    write_unix_installer_fixture(&sb, &valid_payload, shell_tool);
+    #[cfg(unix)]
+    sb.install_fake_tool(
+        "sh",
+        &[
+            ("update_exit", "1"),
+            ("update_stdout", "PATH sh must not run"),
         ],
     );
 
@@ -972,7 +1027,10 @@ fn agents_update_codex_standalone_positive_and_negative_validation() {
     assert!(
         invocations.iter().any(|l| {
             l.starts_with("TOOL=curl|")
-                && l.contains("--proto =https --tlsv1.2 -o")
+                && l.contains("ARGS=-q ")
+                && l.contains("--proto =https --proto-redir =https --tlsv1.2")
+                && l.contains("--max-filesize 1048576")
+                && l.contains("--connect-timeout 15 --max-time 120")
                 && l.contains("https://chatgpt.com/codex/install.")
         }),
         "expected curl download from official HTTPS URL: {invocations:?}"

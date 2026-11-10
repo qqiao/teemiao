@@ -213,6 +213,21 @@ pub struct ProcessRequest {
     pub max_output_bytes: usize,
 }
 
+impl ProcessRequest {
+    fn validate_batch_command(&self) -> Result<(), ProcessError> {
+        if discovery::is_unsafe_windows_batch_command(&self.program, &self.args) {
+            return Err(ProcessError::Io {
+                program: self.program.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Windows batch command path or arguments contain unsafe shell metacharacters",
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Captured result from executing a child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessOutput {
@@ -222,7 +237,7 @@ pub struct ProcessOutput {
     pub success: bool,
     /// Whether the process was terminated by an interrupt/termination signal.
     pub interrupted: bool,
-    /// Whether the process exceeded its execution deadline and was killed.
+    /// Whether execution or post-exit output draining exceeded its deadline.
     pub timed_out: bool,
     /// Captured standard output (bounded by `max_output_bytes`).
     pub stdout: Vec<u8>,
@@ -314,6 +329,7 @@ impl ProcessRunner for RealProcessRunner {
 
 impl RealProcessRunner {
     fn execute_bounded(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+        request.validate_batch_command()?;
         let mut cmd = Command::new(&request.program);
         cmd.args(&request.args)
             .stdin(Stdio::null())
@@ -440,10 +456,22 @@ impl RealProcessRunner {
 
             exit_status
         } else {
-            child.wait().map_err(|source| ProcessError::Io {
+            let status = child.wait().map_err(|source| ProcessError::Io {
                 program: request.program.clone(),
                 source,
-            })?
+            })?;
+            // An updater may leave a background helper holding a pipe open.
+            // Preserve normal updater signal handling; bound the reader drain after
+            // the direct child exits, without killing unrelated/persistent helpers.
+            let (lock, cvar) = &*reader_state;
+            let done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (done, _) = cvar
+                .wait_timeout_while(done, Duration::from_secs(1), |done| {
+                    *done < expected_readers
+                })
+                .unwrap_or_else(|e| e.into_inner());
+            timed_out = *done < expected_readers;
+            status
         };
 
         if !timed_out {
@@ -469,7 +497,7 @@ impl RealProcessRunner {
         };
 
         let status_code = status.code();
-        let interrupted = !timed_out && is_status_interrupted(&status);
+        let interrupted = is_status_interrupted(&status);
         if interrupted {
             self.cancelled.store(true, Ordering::SeqCst);
         }
@@ -530,16 +558,16 @@ impl Drop for ChildProcessGroup {
 fn terminate_timed_out_child(child: &mut std::process::Child, group: &ChildProcessGroup) {
     #[cfg(unix)]
     {
-        let _ = child.kill();
         if group.child_pid > 1 {
-            let neg_pgid = format!("-{}", group.child_pid);
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &neg_pgid])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            // SAFETY: timed probes/downloads alone create a private process group
+            // with this child PID. A negative ID addresses that group; never 0/-1.
+            // No fork/exec is needed, including under process-table exhaustion.
+            let result = unsafe { libc::kill(-(group.child_pid as libc::pid_t), libc::SIGKILL) };
+            if result != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                log::warn!("Could not terminate timed-out child process group");
+            }
         }
+        let _ = child.kill();
     }
     #[cfg(windows)]
     {
@@ -1497,6 +1525,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::ffi::OsStr;
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2586,7 +2615,198 @@ mod tests {
     }
 
     #[test]
-    fn codex_standalone_windows_targeted_release_requires_matching_version() {
+    fn security_batch_probes_reject_unsafe_programs_and_arguments() {
+        for program in [
+            "winget.cmd",
+            "curl.bat",
+            "powershell.cmd",
+            "pwsh.CMD",
+            "npm.cmd",
+        ] {
+            for token in [
+                "a&b", "a|b", "a<b", "a>b", "a^b", "%TEMP%", "!TEMP!", "a\rb", "a\nb", "a\"b",
+            ] {
+                let runner = FakeProcessRunner::new(|_| Ok(ok_output("")), |_| unreachable!());
+                let unsafe_path = PathBuf::from(token).join(program);
+                assert!(
+                    discovery::run_bounded_probe(&unsafe_path, &["--version"], &runner).is_err()
+                );
+                assert!(
+                    discovery::run_bounded_probe(Path::new(program), &["--prefix", token], &runner)
+                        .is_err()
+                );
+                assert!(runner.probe_calls().is_empty());
+            }
+        }
+        let runner = FakeProcessRunner::new(|_| Ok(ok_output("ok")), |_| unreachable!());
+        assert!(
+            discovery::run_bounded_probe(
+                Path::new("Program Files (x86)/npm.cmd"),
+                &["--prefix", "Program Files (x86)/npm"],
+                &runner
+            )
+            .is_ok()
+        );
+        assert!(
+            discovery::run_bounded_probe(Path::new("native.exe"), &["literal&argument"], &runner)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn security_standalone_binds_launcher_current_marker_and_probe() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join(".local/bin");
+        let standalone = tmp.path().join(".codex/packages/standalone");
+        let release = standalone.join("releases/0.167.0-aarch64-apple-darwin");
+        let custom = standalone.join("releases/0.167.0-custom");
+        for path in [&release, &custom] {
+            create_executable(&path.join("bin/codex"), "#!/bin/sh\n");
+            fs::write(
+                path.join("codex-package.json"),
+                r#"{"version":"0.167.0","target":"aarch64-apple-darwin"}"#,
+            )
+            .unwrap();
+        }
+        fs::write(
+            standalone.join("auto-update-version"),
+            "0.167.0-aarch64-apple-darwin",
+        )
+        .unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let current = standalone.join("current");
+        std::os::unix::fs::symlink(&release, &current).unwrap();
+        let launcher = bin.join("codex");
+        let env = test_env(&[&bin], tmp.path());
+        for (active, banner, automatic) in [
+            (&release, "codex-cli 0.167.0", true),
+            (&custom, "codex-cli 0.167.0", false),
+            (&release, "unreadable", false),
+        ] {
+            std::os::unix::fs::symlink(active.join("bin/codex"), &launcher).unwrap();
+            let runner = FakeProcessRunner::new(move |_| Ok(ok_output(banner)), |_| unreachable!());
+            let agent = discover_agent(
+                AgentId::Codex,
+                &env,
+                &runner,
+                &mut PackageManagerCache::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(agent.owner, UpdateOwner::CodexStandalone { .. }),
+                automatic,
+                "{active:?} {banner}: {:?}",
+                agent.owner
+            );
+            fs::remove_file(&launcher).unwrap();
+        }
+        std::os::unix::fs::symlink(custom.join("bin/codex"), &launcher).unwrap();
+        fs::remove_file(&current).unwrap();
+        let runner =
+            FakeProcessRunner::new(|_| Ok(ok_output("codex-cli 0.167.0")), |_| unreachable!());
+        let agent = discover_agent(
+            AgentId::Codex,
+            &env,
+            &runner,
+            &mut PackageManagerCache::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn security_oversized_ownership_evidence_cannot_authorize_an_update() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join(".local/bin");
+        let current = tmp.path().join(".codex/packages/standalone/current");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(
+            current.parent().unwrap().join("auto-update-version"),
+            "0.167.0",
+        )
+        .unwrap();
+        fs::write(
+            current.join("codex-package.json"),
+            r#"{"version":"0.167.0"}"#,
+        )
+        .unwrap();
+        let wrapper = format!(
+            "#!/bin/sh\nexec \"{}\" \"$@\"\n{}\nexec /different/codex \"$@\"\n",
+            current.join("bin/codex").display(),
+            " ".repeat(8192)
+        );
+        create_executable(&bin.join("codex"), &wrapper);
+        let env = test_env(&[&bin], tmp.path());
+        let runner =
+            FakeProcessRunner::new(|_| Ok(ok_output("codex-cli 0.167.0")), |_| unreachable!());
+        let agent = discover_agent(
+            AgentId::Codex,
+            &env,
+            &runner,
+            &mut PackageManagerCache::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(agent.owner, UpdateOwner::ManualActionRequired { .. }),
+            "{:?}",
+            agent.owner
+        );
+        create_executable(
+            &bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                current.join("bin/codex").display()
+            ),
+        );
+        let manifest = format!("{{\"version\":\"0.167.0\"}}{}", " ".repeat(1024 * 1024));
+        fs::write(current.join("codex-package.json"), manifest).unwrap();
+        let agent = discover_agent(
+            AgentId::Codex,
+            &env,
+            &runner,
+            &mut PackageManagerCache::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(agent.owner, UpdateOwner::ManualActionRequired { .. }),
+            "{:?}",
+            agent.owner
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn security_update_does_not_wait_forever_for_inherited_pipes() {
+        // The fixture's descendant terminates itself, even against the unfixed runner.
+        let request = ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                OsString::from("-c"),
+                OsString::from("/bin/sleep 4 & echo finished"),
+            ],
+            env_overrides: Vec::new(),
+            timeout: None,
+            max_output_bytes: 1024,
+        };
+        let start = Instant::now();
+        let output = RealProcessRunner::new().run_update(&request).unwrap();
+        let elapsed = start.elapsed();
+        // Collect the fixture descendant before returning, including on test failure.
+        thread::sleep(Duration::from_secs(4).saturating_sub(elapsed));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "inherited pipe blocked for {elapsed:?}"
+        );
+        assert!(output.timed_out && !output.success);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("finished"));
+    }
+
+    #[test]
+    fn codex_standalone_windows_targeted_release_requires_matching_selection_and_version() {
         let tmp = TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         let codex_home = tmp.path().join(".codex");
@@ -2613,22 +2833,31 @@ mod tests {
             is_windows: true,
             ..test_env(&[&bin], tmp.path())
         };
-        for (banner, matches_release) in [("codex-cli 0.167.0", true), ("codex-cli 0.166.0", false)]
-        {
-            let runner = FakeProcessRunner::new(move |_| Ok(ok_output(banner)), |_| unreachable!());
-            let agent = discover_agent(
-                AgentId::Codex,
-                &env,
-                &runner,
-                &mut PackageManagerCache::new(),
-            )
-            .unwrap();
-            assert_eq!(
-                matches!(agent.owner, UpdateOwner::CodexStandalone { .. }),
-                matches_release,
-                "{banner}: {:?}",
-                agent.owner
-            );
+        for has_current in [false, true] {
+            if has_current {
+                fs::rename(&release, standalone.join("current")).unwrap();
+            }
+            for (banner, matches_release) in [
+                ("codex-cli 0.167.0", true),
+                ("codex-cli 0.166.0", false),
+                ("unreadable", false),
+            ] {
+                let runner =
+                    FakeProcessRunner::new(move |_| Ok(ok_output(banner)), |_| unreachable!());
+                let agent = discover_agent(
+                    AgentId::Codex,
+                    &env,
+                    &runner,
+                    &mut PackageManagerCache::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    matches!(agent.owner, UpdateOwner::CodexStandalone { .. }),
+                    has_current && matches_release,
+                    "{banner}, current={has_current}: {:?}",
+                    agent.owner
+                );
+            }
         }
     }
 
