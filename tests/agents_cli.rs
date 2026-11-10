@@ -2618,44 +2618,85 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
         }
     }
 
-    // 8. Architecture banner (`darwin-arm64` / `linux x64`) is accepted, while conflicting CLI branding in `--help`
-    // (`Acme Qoder CLI` for `qoder`, `Acme CLI` for `qodercli`) is rejected with zero updater invocations
-    let sb_arch = TestSandbox::new();
-    sb_arch.install_fake_tool(
-        "qodercli",
-        &[
-            ("version_stdout", "Qoder CLI 0.9.1 (darwin-arm64)"),
-            (
-                "help_stdout",
-                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
-            ),
-            ("update_stdout", "Qoder CLI is up to date"),
-        ],
-    );
-    let out_arch = sb_arch.run_teemiao(&["agents", "update", "qoder"], &[&sb_arch.bin_dir], &[]);
-    assert_eq!(out_arch.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&out_arch.stdout)
-            .contains("Qoder (qoder): up to date (version: 0.9.1;"),
-        "expected darwin-arm64 banner to be accepted: {}",
-        String::from_utf8_lossy(&out_arch.stdout)
-    );
+    // 8. Architecture banner (`darwin-arm64` / `linux x64`) as well as multiline `Usage:` and description paragraphs
+    // in `--help` are accepted, while conflicting CLI branding in `--help` (`Acme Qoder CLI` for `qoder`/`qodercli`,
+    // `Acme CLI` for `qodercli`) is rejected with zero updater invocations
+    for help_layout in [
+        "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+        "Qoder CLI<NL>Usage:<NL>  qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+        "Qoder CLI<NL>An AI coding assistant for your terminal.<NL>Usage: qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+    ] {
+        let sb_arch = TestSandbox::new();
+        sb_arch.install_fake_tool(
+            "qodercli",
+            &[
+                ("version_stdout", "Qoder CLI 0.9.1 (darwin-arm64)"),
+                ("help_stdout", help_layout),
+                ("update_stdout", "Qoder CLI is up to date"),
+            ],
+        );
+        let out_list_arch = sb_arch.run_teemiao(&["agents", "list"], &[&sb_arch.bin_dir], &[]);
+        assert_eq!(out_list_arch.status.code(), Some(0));
+        assert!(
+            String::from_utf8_lossy(&out_list_arch.stdout).contains("Qoder (qoder)"),
+            "expected Qoder to be listed for help layout `{help_layout}`, stdout={}",
+            String::from_utf8_lossy(&out_list_arch.stdout)
+        );
+        let out_arch =
+            sb_arch.run_teemiao(&["agents", "update", "qoder"], &[&sb_arch.bin_dir], &[]);
+        assert_eq!(
+            out_arch.status.code(),
+            Some(0),
+            "expected update to succeed for help layout `{help_layout}`, stderr={}",
+            String::from_utf8_lossy(&out_arch.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out_arch.stdout)
+                .contains("Qoder (qoder): up to date (version: 0.9.1;"),
+            "expected darwin-arm64 banner + help layout `{help_layout}` to be accepted: {}",
+            String::from_utf8_lossy(&out_arch.stdout)
+        );
+        assert!(
+            sb_arch
+                .invocations()
+                .iter()
+                .any(|l| l.contains("|ARGS=update|")),
+            "expected native updater invocation for help layout `{help_layout}`: {:?}",
+            sb_arch.invocations()
+        );
+    }
 
-    for (bin_name, conflicting_help) in [
+    for (bin_name, ver_out, conflicting_help) in [
         (
             "qoder",
+            "1.2.3",
             "Acme Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
         ),
-        ("qodercli", "Acme CLI<NL>Commands:<NL>  update  Update CLI"),
+        (
+            "qodercli",
+            "Qoder CLI 0.9.0",
+            "Acme Qoder CLI<NL>Usage: qodercli [command]<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        (
+            "qodercli",
+            "1.2.3",
+            "Acme CLI<NL>Commands:<NL>  update  Update CLI",
+        ),
     ] {
         let sb_conf = TestSandbox::new();
         sb_conf.install_fake_tool(
             bin_name,
             &[
-                ("version_stdout", "1.2.3"),
+                ("version_stdout", ver_out),
                 ("help_stdout", conflicting_help),
                 ("update_stdout", "Updated Acme CLI"),
             ],
+        );
+        let out_conf_list = sb_conf.run_teemiao(&["agents", "list"], &[&sb_conf.bin_dir], &[]);
+        assert!(
+            !String::from_utf8_lossy(&out_conf_list.stdout).contains("Qoder (qoder)"),
+            "conflicting help branding `{conflicting_help}` must not list Qoder: {}",
+            String::from_utf8_lossy(&out_conf_list.stdout)
         );
         let out_conf =
             sb_conf.run_teemiao(&["agents", "update", "qoder"], &[&sb_conf.bin_dir], &[]);

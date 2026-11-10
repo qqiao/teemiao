@@ -4825,15 +4825,67 @@ fn main() -> ExitCode {
             ));
         }
 
-        // 13. Conflicting CLI branding in `--help` (`Acme Qoder CLI` for shared `qoder`, `Acme CLI` for `qodercli`) is rejected
-        for (env_target, conflicting_help) in [
+        // 13. Help structure vs product branding:
+        // - Valid multiline `Usage:\n  qodercli [command]` and description paragraphs
+        //   (`An AI coding assistant for your terminal.`) must be accepted as NativeSelfUpdate.
+        // - Conflicting CLI branding in `--help` (`Acme Qoder CLI` for shared `qoder`, `Acme CLI` for `qodercli`,
+        //   or multiline `Usage:\n  index-tool [command]`) must be rejected.
+        for valid_help_layout in [
+            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            "Qoder CLI\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            "Qoder CLI\nAn AI coding assistant for your terminal.\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            "Qoder CLI\nAn AI coding assistant for your terminal.\n\nUsage:\n  qodercli [command]\n  qodercli [options]\n\nCommands:\n  update  Update Qoder CLI",
+            "Qoder CLI - An AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            "Qoder CLI is an AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+        ] {
+            let runner_valid_help = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(valid_help_layout))
+                    } else {
+                        Ok(ok_output("Qoder CLI 0.9.0"))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_vh = PackageManagerCache::new();
+            let discovered_vh =
+                discover_agent(AgentId::Qoder, &env_both, &runner_valid_help, &mut cache_vh)
+                    .unwrap_or_else(|| {
+                        panic!("expected valid help layout to be accepted:\n{valid_help_layout}")
+                    });
+            assert!(
+                matches!(discovered_vh.owner, UpdateOwner::NativeSelfUpdate { .. }),
+                "expected NativeSelfUpdate for valid help layout:\n{valid_help_layout}\ngot: {:?}",
+                discovered_vh.owner
+            );
+        }
+
+        for (env_target, ver_text, conflicting_help) in [
             (
                 &env_fallback,
+                "1.2.3",
                 "Acme Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
             ),
             (
                 &env_both,
+                "Qoder CLI 0.9.0",
+                "Acme Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "1.2.3",
                 "Acme CLI\nUsage: qodercli [command]\nCommands:\n  update  Update CLI",
+            ),
+            (
+                &env_both,
+                "Qoder CLI 0.9.0",
+                "Acme Qoder CLI\nAn AI coding assistant for your terminal.\nUsage:\n  qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "Qoder CLI 0.9.0",
+                "Qoder CLI\nUsage:\n  index-tool [command]\nCommands:\n  update  Update Qoder CLI",
             ),
         ] {
             let runner_conflicting_help = FakeProcessRunner::new(
@@ -4841,7 +4893,7 @@ fn main() -> ExitCode {
                     if req.args.iter().any(|a| a == "--help") {
                         Ok(ok_output(conflicting_help))
                     } else {
-                        Ok(ok_output("1.2.3"))
+                        Ok(ok_output(ver_text))
                     }
                 },
                 |_| unreachable!(),
