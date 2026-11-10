@@ -4793,5 +4793,235 @@ fn main() -> ExitCode {
                 qoder_nh.owner
             );
         }
+
+        // 12. Architecture tokens in version banner (`darwin-arm64`, `linux x64`, `aarch64`, `x86_64`) are preserved and accepted
+        for arch_banner in [
+            "Qoder CLI 0.9.1 (darwin-arm64)",
+            "Qoder CLI 0.2.1 (linux x64)",
+            "qodercli 0.9.1 linux-aarch64",
+            "Qoder CLI 0.9.1 (windows-x86_64)",
+        ] {
+            let runner_arch = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(
+                            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                        ))
+                    } else {
+                        Ok(ok_output(arch_banner))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_arch = PackageManagerCache::new();
+            let discovered_arch =
+                discover_agent(AgentId::Qoder, &env_both, &runner_arch, &mut cache_arch)
+                    .unwrap_or_else(|| {
+                        panic!("expected arch banner `{arch_banner}` to be accepted")
+                    });
+            assert!(matches!(
+                discovered_arch.owner,
+                UpdateOwner::NativeSelfUpdate { .. }
+            ));
+        }
+
+        // 13. Conflicting CLI branding in `--help` (`Acme Qoder CLI` for shared `qoder`, `Acme CLI` for `qodercli`) is rejected
+        for (env_target, conflicting_help) in [
+            (
+                &env_fallback,
+                "Acme Qoder CLI\nUsage: qoder [command]\nCommands:\n  update  Update Qoder CLI",
+            ),
+            (
+                &env_both,
+                "Acme CLI\nUsage: qodercli [command]\nCommands:\n  update  Update CLI",
+            ),
+        ] {
+            let runner_conflicting_help = FakeProcessRunner::new(
+                move |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(conflicting_help))
+                    } else {
+                        Ok(ok_output("1.2.3"))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_ch = PackageManagerCache::new();
+            assert!(
+                discover_agent(
+                    AgentId::Qoder,
+                    env_target,
+                    &runner_conflicting_help,
+                    &mut cache_ch
+                )
+                .is_none(),
+                "conflicting help banner `{conflicting_help}` must be rejected"
+            );
+        }
+
+        // 14. Windows package-manager-owned installations (WinGet, Scoop, Chocolatey) and wrapper targets
+        // must yield ManualActionRequired and never NativeSelfUpdate
+        let win_winget_dir = home
+            .join("AppData")
+            .join("Local")
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Packages")
+            .join("Qoder.QoderCLI_Microsoft.Winget.Source_8wekyb3d8bbwe");
+        let win_scoop_dir = home
+            .join("scoop")
+            .join("apps")
+            .join("qodercli")
+            .join("current");
+        let win_choco_dir = tmp
+            .path()
+            .join("ProgramData")
+            .join("chocolatey")
+            .join("lib")
+            .join("qodercli")
+            .join("tools");
+        for (expected_mgr, mgr_dir) in [
+            ("winget", &win_winget_dir),
+            ("scoop", &win_scoop_dir),
+            ("chocolatey", &win_choco_dir),
+        ] {
+            create_executable(&mgr_dir.join("qodercli.exe"), "MZ\0");
+            let env_win_mgr = DiscoveryEnv {
+                path: std::env::join_paths([mgr_dir]).unwrap(),
+                pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+                home_dir: Some(home.clone()),
+                local_app_data: Some(home.join("AppData").join("Local")),
+                codex_home: None,
+                codex_install_dir: None,
+                homebrew_prefix: None,
+                is_windows: true,
+            };
+            let runner_win_mgr = FakeProcessRunner::new(
+                |req| {
+                    if req.args.iter().any(|a| a == "--help") {
+                        Ok(ok_output(
+                            "Qoder CLI\nUsage: qodercli [command]\nCommands:\n  update  Update Qoder CLI",
+                        ))
+                    } else {
+                        Ok(ok_output("Qoder CLI 0.9.0"))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache_wm = PackageManagerCache::new();
+            let qoder_wm =
+                discover_agent(AgentId::Qoder, &env_win_mgr, &runner_win_mgr, &mut cache_wm)
+                    .unwrap();
+            match &qoder_wm.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains(expected_mgr),
+                        "expected `{expected_mgr}` in manual reason, got: {reason}"
+                    );
+                }
+                other => {
+                    panic!("expected ManualActionRequired for `{expected_mgr}`, got {other:?}")
+                }
+            }
+
+            // Also verify a forwarding `.cmd` wrapper pointing to the managed binary retains ManualActionRequired
+            let win_wrap_dir = tmp.path().join(format!("win-wrap-{expected_mgr}"));
+            create_executable(
+                &win_wrap_dir.join("qodercli.cmd"),
+                &format!(
+                    "@echo off\r\n\"{}\" %*\r\n",
+                    mgr_dir.join("qodercli.exe").display()
+                ),
+            );
+            let env_win_wrap = DiscoveryEnv {
+                path: std::env::join_paths([&win_wrap_dir]).unwrap(),
+                pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+                home_dir: Some(home.clone()),
+                local_app_data: Some(home.join("AppData").join("Local")),
+                codex_home: None,
+                codex_install_dir: None,
+                homebrew_prefix: None,
+                is_windows: true,
+            };
+            let mut cache_ww = PackageManagerCache::new();
+            let qoder_ww = discover_agent(
+                AgentId::Qoder,
+                &env_win_wrap,
+                &runner_win_mgr,
+                &mut cache_ww,
+            )
+            .unwrap();
+            match &qoder_ww.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains(expected_mgr),
+                        "expected `{expected_mgr}` in wrapped manual reason, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected ManualActionRequired for wrapped `{expected_mgr}`, got {other:?}"
+                ),
+            }
+        }
+
+        // 15. Unlisted SemVer prerelease suffix (`0.9.0-preview.1`) in `--version` or in `package.json` when `--version` is unreadable
+        // requires manual action to preserve channel, while build-metadata-only (`0.9.0+20261110`) stays NpmGlobal
+        let pre_prefix = tmp.path().join("npm-qoder-prerelease");
+        let pre_bin = pre_prefix.join("bin");
+        let pre_pkg = pre_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(pre_pkg.join("bin")).unwrap();
+        fs::write(
+            pre_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.9.0-preview.1","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        create_executable(
+            &pre_bin.join("qodercli"),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                pre_pkg.join("bin").join("qodercli.js").display()
+            ),
+        );
+        create_executable(&pre_bin.join("npm"), "#!/bin/sh\n");
+        let env_pre = test_env(&[&pre_bin], &home);
+        for probe_ver in ["qodercli 0.9.0-preview.1", "qodercli"] {
+            let runner_pre =
+                FakeProcessRunner::new(move |_| Ok(ok_output(probe_ver)), |_| unreachable!());
+            let mut cache_pre = PackageManagerCache::new();
+            let qoder_pre =
+                discover_agent(AgentId::Qoder, &env_pre, &runner_pre, &mut cache_pre).unwrap();
+            match &qoder_pre.owner {
+                UpdateOwner::ManualActionRequired { reason, .. } => {
+                    assert!(
+                        reason.contains("prerelease"),
+                        "expected prerelease manual reason for `{probe_ver}`, got: {reason}"
+                    );
+                }
+                other => {
+                    panic!("expected ManualActionRequired for `{probe_ver}`, got {other:?}")
+                }
+            }
+        }
+        fs::write(
+            pre_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.9.0+20261110","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        let runner_build_meta = FakeProcessRunner::new(
+            |_| Ok(ok_output("qodercli 0.9.0+20261110")),
+            |_| unreachable!(),
+        );
+        let mut cache_bm = PackageManagerCache::new();
+        let qoder_bm =
+            discover_agent(AgentId::Qoder, &env_pre, &runner_build_meta, &mut cache_bm).unwrap();
+        assert!(
+            matches!(qoder_bm.owner, UpdateOwner::NpmGlobal { .. }),
+            "build-metadata-only version `0.9.0+20261110` should remain NpmGlobal, got {:?}",
+            qoder_bm.owner
+        );
     }
 }

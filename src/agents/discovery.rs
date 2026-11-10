@@ -739,6 +739,7 @@ fn try_verify_qoder_candidate(
                 );
                 if has_qoder_desktop_or_ide_signature(&combined_help)
                     || help_has_conflicting_usage_program(&combined_help)
+                    || help_has_conflicting_product_banner(&combined_help)
                 {
                     return None;
                 }
@@ -766,6 +767,7 @@ fn try_verify_qoder_candidate(
             let owner = determine_qoder_owner(
                 &launcher_path,
                 &resolved_path,
+                &wrapper_targets,
                 version.as_deref(),
                 npm_signal,
                 has_native_update_cmd,
@@ -801,8 +803,15 @@ fn try_verify_qoder_candidate(
                 )
                 .to_string(),
             );
-            let owner =
-                determine_qoder_owner(&launcher_path, &resolved_path, None, npm_signal, false, env);
+            let owner = determine_qoder_owner(
+                &launcher_path,
+                &resolved_path,
+                &wrapper_targets,
+                None,
+                npm_signal,
+                false,
+                env,
+            );
             Some(DiscoveredAgent {
                 id: AgentId::Qoder,
                 version: None,
@@ -847,9 +856,12 @@ fn has_conflicting_non_qoder_product(text: &str) -> bool {
             continue;
         }
         for word in raw_token
-            .split(|c: char| !c.is_ascii_alphabetic())
+            .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|w| !w.is_empty())
         {
+            if word.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
             let lower = word.to_ascii_lowercase();
             if !matches!(
                 lower.as_str(),
@@ -869,9 +881,12 @@ fn has_conflicting_non_qoder_product(text: &str) -> bool {
                     | "darwin"
                     | "linux"
                     | "windows"
+                    | "win32"
+                    | "win64"
                     | "macos"
                     | "x86"
                     | "x64"
+                    | "x86_64"
                     | "arm64"
                     | "aarch64"
                     | "amd64"
@@ -932,9 +947,43 @@ fn help_has_conflicting_usage_program(help_text: &str) -> bool {
     false
 }
 
+fn help_has_conflicting_product_banner(help_text: &str) -> bool {
+    for raw_line in help_text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("commands:")
+            || lower.starts_with("available commands:")
+            || lower.starts_with("options:")
+            || lower.starts_with("flags:")
+            || lower.starts_with("arguments:")
+        {
+            break;
+        }
+        if lower.starts_with("usage:")
+            || lower.starts_with("error:")
+            || lower.starts_with("fatal:")
+            || lower.starts_with("warning:")
+            || lower.starts_with("note:")
+            || lower.starts_with('-')
+            || lower.starts_with('*')
+            || line_negates_or_rejects_update(&lower)
+        {
+            continue;
+        }
+        if !lower.contains("qoder") || has_conflicting_non_qoder_product(trimmed) {
+            return true;
+        }
+    }
+    false
+}
+
 fn help_has_qoder_cli_evidence(help_text: &str) -> bool {
     if has_qoder_desktop_or_ide_signature(help_text)
         || help_has_conflicting_usage_program(help_text)
+        || help_has_conflicting_product_banner(help_text)
     {
         return false;
     }
@@ -1024,6 +1073,7 @@ fn description_targets_unrelated_artifact(lower_desc: &str) -> bool {
 fn help_supports_qoder_native_update(help_text: &str) -> bool {
     if has_qoder_desktop_or_ide_signature(help_text)
         || help_has_conflicting_usage_program(help_text)
+        || help_has_conflicting_product_banner(help_text)
     {
         return false;
     }
@@ -1155,11 +1205,9 @@ fn has_unverified_wrapper_forwarding(launcher_path: &Path, resolved_path: &Path)
         let Some(sample) = read_text_wrapper_sample(path) else {
             continue;
         };
-        let lower = sample.to_ascii_lowercase();
+        let lower = sample.to_ascii_lowercase().replace('\\', "/");
         if lower.contains("/cellar/")
-            || lower.contains("\\cellar\\")
             || lower.contains("/caskroom/")
-            || lower.contains("\\caskroom\\")
             || lower.contains("node_modules")
             || lower.contains("@qoder-ai/qodercli")
             || lower.contains("/.bun/")
@@ -1167,6 +1215,11 @@ fn has_unverified_wrapper_forwarding(launcher_path: &Path, resolved_path: &Path)
             || lower.contains("/.yarn/")
             || lower.contains("/nix/store/")
             || lower.contains("microsoft/winget/")
+            || lower.contains("/winget/packages/")
+            || lower.contains("/winget/links/")
+            || lower.contains("/scoop/apps/")
+            || lower.contains("/scoop/shims/")
+            || lower.contains("/chocolatey/")
         {
             return true;
         }
@@ -1232,12 +1285,12 @@ fn detect_homebrew_in_target_prefix(
 fn determine_qoder_owner(
     launcher_path: &Path,
     resolved_path: &Path,
+    wrapper_targets: &[(PathBuf, PathBuf)],
     version: Option<&str>,
     npm_signal: Option<ManagerSignal>,
     has_native_update_cmd: bool,
     env: &DiscoveryEnv,
 ) -> UpdateOwner {
-    let wrapper_targets = collect_verified_wrapper_targets(launcher_path, resolved_path);
     let mut signals = Vec::new();
     if let Some(npm_sig) = npm_signal {
         signals.push(npm_sig);
@@ -1246,7 +1299,7 @@ fn determine_qoder_owner(
         for brew_sig in detect_homebrew_ownership(launcher_path, resolved_path, version, key, env) {
             push_unique_manager_signal(&mut signals, brew_sig, env.is_windows);
         }
-        for (target_path, resolved_target_path) in &wrapper_targets {
+        for (target_path, resolved_target_path) in wrapper_targets {
             for brew_sig in
                 detect_homebrew_ownership(target_path, resolved_target_path, version, key, env)
             {
@@ -1270,7 +1323,7 @@ fn determine_qoder_owner(
             env.is_windows,
         );
     }
-    for (target_path, resolved_target_path) in &wrapper_targets {
+    for (target_path, resolved_target_path) in wrapper_targets {
         if let Some(unsupported) =
             detect_unsupported_foreign_manager(target_path, resolved_target_path, false)
         {
@@ -1559,6 +1612,7 @@ fn inspect_candidate(
             AgentId::Qoder => determine_qoder_owner(
                 &launcher_path,
                 &resolved_path,
+                &collect_verified_wrapper_targets(&launcher_path, &resolved_path),
                 version.as_deref(),
                 detect_npm_ownership(
                     &launcher_path,
@@ -2823,12 +2877,14 @@ fn package_json_has_prerelease(prefix: &Path, expected_pkg: &str) -> bool {
 }
 
 fn read_text_wrapper_sample(launcher_path: &Path) -> Option<String> {
-    let bytes = fs::read(launcher_path).ok()?;
-    let slice = &bytes[..bytes.len().min(8192)];
-    if slice.contains(&0) {
+    use std::io::Read;
+    let file = fs::File::open(launcher_path).ok()?;
+    let mut bytes = Vec::with_capacity(8192);
+    file.take(8192).read_to_end(&mut bytes).ok()?;
+    if bytes.contains(&0) {
         return None;
     }
-    Some(String::from_utf8_lossy(slice).into_owned())
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn launcher_targets_npm_pkg_root(
@@ -3703,6 +3759,25 @@ fn detect_unsupported_foreign_manager(
         if normalized.contains("/flatpak/") {
             return Some("flatpak".to_string());
         }
+        if normalized.contains("/scoop/apps/") || normalized.contains("/scoop/shims/") {
+            return Some("scoop".to_string());
+        }
+        if normalized.contains("/programdata/chocolatey/")
+            || normalized.contains("/chocolatey/lib/")
+            || normalized.contains("/chocolatey/bin/")
+        {
+            return Some("chocolatey".to_string());
+        }
+        if !normalized.contains("microsoft/winget/packages/anthropic.claudecode")
+            && !normalized.contains("microsoft/winget/links/claude")
+            && !has_adjacent_marker(launcher_path, resolved_path, ".winget-anthropic-claudecode")
+            && (normalized.contains("/microsoft/winget/packages/")
+                || normalized.contains("/microsoft/winget/links/")
+                || normalized.contains("/winget/packages/")
+                || normalized.contains("/winget/links/"))
+        {
+            return Some("winget".to_string());
+        }
         if normalized.starts_with("/usr/bin/")
             || normalized.starts_with("/usr/games/")
             || normalized.starts_with("/bin/")
@@ -3737,7 +3812,20 @@ fn is_non_default_channel_version(version: Option<&str>) -> bool {
     let Some(ver) = version else {
         return false;
     };
-    let lower = ver.to_ascii_lowercase();
+    let trimmed = ver.trim().trim_start_matches(['v', 'V']);
+    let without_build = trimmed.split('+').next().unwrap_or(trimmed);
+    if let Some((core, prerelease)) = without_build.split_once('-')
+        && !prerelease.is_empty()
+        && core
+            .split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && prerelease
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return true;
+    }
+    let lower = without_build.to_ascii_lowercase();
     lower.contains("-alpha")
         || lower.contains("-beta")
         || lower.contains("-canary")

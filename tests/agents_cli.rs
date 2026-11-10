@@ -2617,4 +2617,154 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
             );
         }
     }
+
+    // 8. Architecture banner (`darwin-arm64` / `linux x64`) is accepted, while conflicting CLI branding in `--help`
+    // (`Acme Qoder CLI` for `qoder`, `Acme CLI` for `qodercli`) is rejected with zero updater invocations
+    let sb_arch = TestSandbox::new();
+    sb_arch.install_fake_tool(
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI 0.9.1 (darwin-arm64)"),
+            (
+                "help_stdout",
+                "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+            ("update_stdout", "Qoder CLI is up to date"),
+        ],
+    );
+    let out_arch = sb_arch.run_teemiao(&["agents", "update", "qoder"], &[&sb_arch.bin_dir], &[]);
+    assert_eq!(out_arch.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out_arch.stdout)
+            .contains("Qoder (qoder): up to date (version: 0.9.1;"),
+        "expected darwin-arm64 banner to be accepted: {}",
+        String::from_utf8_lossy(&out_arch.stdout)
+    );
+
+    for (bin_name, conflicting_help) in [
+        (
+            "qoder",
+            "Acme Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+        ),
+        ("qodercli", "Acme CLI<NL>Commands:<NL>  update  Update CLI"),
+    ] {
+        let sb_conf = TestSandbox::new();
+        sb_conf.install_fake_tool(
+            bin_name,
+            &[
+                ("version_stdout", "1.2.3"),
+                ("help_stdout", conflicting_help),
+                ("update_stdout", "Updated Acme CLI"),
+            ],
+        );
+        let out_conf =
+            sb_conf.run_teemiao(&["agents", "update", "qoder"], &[&sb_conf.bin_dir], &[]);
+        assert_eq!(out_conf.status.code(), Some(1));
+        assert!(
+            !sb_conf
+                .invocations()
+                .iter()
+                .any(|l| l.contains("|ARGS=update|")),
+            "conflicting help branding `{conflicting_help}` must perform zero updater calls: {:?}",
+            sb_conf.invocations()
+        );
+    }
+
+    // 9. Windows package-manager paths (WinGet, Scoop, Chocolatey) and wrapper targets must require manual action
+    // and perform zero updater invocations
+    for rel_mgr_dir in [
+        "AppData/Local/Microsoft/WinGet/Packages/Qoder.QoderCLI_8wekyb3d8bbwe",
+        "scoop/apps/qodercli/current",
+        "ProgramData/chocolatey/lib/qodercli/tools",
+    ] {
+        let sb_wm = TestSandbox::new();
+        let mgr_dir = sb_wm.root.join(rel_mgr_dir);
+        sb_wm.install_fake_tool_in(
+            &mgr_dir,
+            "qodercli",
+            &[
+                ("version_stdout", "Qoder CLI 0.9.0"),
+                (
+                    "help_stdout",
+                    "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+                ),
+                ("update_stdout", "Qoder CLI is up to date"),
+            ],
+        );
+        let out_wm = sb_wm.run_teemiao(&["agents", "update", "qoder"], &[&mgr_dir], &[]);
+        assert_eq!(out_wm.status.code(), Some(1));
+        let stdout_wm = String::from_utf8_lossy(&out_wm.stdout);
+        assert!(
+            stdout_wm.contains("manual action required"),
+            "expected manual action required for `{rel_mgr_dir}`: {stdout_wm}"
+        );
+        assert!(
+            !sb_wm
+                .invocations()
+                .iter()
+                .any(|l| l.contains("|ARGS=update|")),
+            "managed directory `{rel_mgr_dir}` must perform zero updater invocations: {:?}",
+            sb_wm.invocations()
+        );
+    }
+
+    // 10. SemVer prerelease `0.9.0-preview.1` (both in `--version` and in `package.json` when `--version` is unreadable)
+    // requires manual action and performs zero `npm` update calls
+    for probe_ver in ["qodercli 0.9.0-preview.1", "qodercli"] {
+        let sb_pre = TestSandbox::new();
+        let pre_prefix = sb_pre.root.join("npm_pre");
+        let pre_bin = pre_prefix.join("bin");
+        let pre_pkg = pre_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        let pre_pkg_bin = pre_pkg.join("bin");
+        fs::create_dir_all(&pre_bin).unwrap();
+        fs::create_dir_all(&pre_pkg_bin).unwrap();
+        fs::write(
+            pre_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"0.9.0-preview.1"}"#,
+        )
+        .unwrap();
+        let (real_pre_qodercli, _) = sb_pre.install_fake_tool_in(
+            &pre_pkg_bin,
+            "qodercli",
+            &[
+                ("version_stdout", probe_ver),
+                (
+                    "help_stdout",
+                    "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+                ),
+            ],
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_pre_qodercli, pre_bin.join("qodercli")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(
+                pre_bin.join("qodercli.cmd"),
+                format!("@echo off\r\n\"{}\" %*\r\n", real_pre_qodercli.display()),
+            )
+            .unwrap();
+        }
+        sb_pre.install_fake_tool_in(&pre_bin, "npm", &[("update_stdout", "added 1 package")]);
+        let out_pre = sb_pre.run_teemiao(&["agents", "update", "qoder"], &[&pre_bin], &[]);
+        assert_eq!(out_pre.status.code(), Some(1));
+        let stdout_pre = String::from_utf8_lossy(&out_pre.stdout);
+        assert!(
+            stdout_pre.contains("manual action required") && stdout_pre.contains("prerelease"),
+            "expected prerelease manual action for `{probe_ver}`: {stdout_pre}"
+        );
+        assert!(
+            !sb_pre
+                .invocations()
+                .iter()
+                .any(|l| l.starts_with("TOOL=npm|") || l.contains("|ARGS=update|")),
+            "prerelease `{probe_ver}` must perform zero npm/native update calls: {:?}",
+            sb_pre.invocations()
+        );
+    }
 }
