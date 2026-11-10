@@ -2,7 +2,11 @@
 
 **Issue:** QQ-9
 
-**Status:** Draft; implementation is not yet authorized
+**Status:** Historical; implementation reviewed, merged, and accepted
+
+See the acceptance evidence in [spec.md](spec.md). This plan records the design
+delivered in [PR #26](https://github.com/qqiao/teemiao/pull/26), merged as
+`bae5920599a572e3ee728a5f75bce6279536ad2d`; it is not pending implementation.
 
 **Branch:** `agent/leader/dde0f9b81f6e`, based on `main`
 

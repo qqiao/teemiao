@@ -1,7 +1,8 @@
 # Tasks: agent command improvements
 
-**Issue:** QQ-9. All implementation tasks await T001. Specs and plans are owned
-by the leader; the coder may append completion evidence to this checklist.
+**Issue:** QQ-9. Historical checklist; implementation and final acceptance are
+complete. Leader reconciliation below cites the issue's recorded review and
+human acceptance; merge alone is not treated as approval evidence.
 
 - [x] **T001 — Approve the review package** (Qian Qiao; HumanReviewer).
   Review `spec.md`, `plan.md`, this checklist, and the existing CONSTRAINTS.md.
@@ -56,18 +57,24 @@ by the leader; the coder may append completion evidence to this checklist.
   Files: `README.md`, both locale files, `Cargo.toml`, `Cargo.lock`.
   Dependency: behavior checkpoint. Requirements: FR-003, FR-008.
 
-- [ ] **T005 — Independent adversarial review and PR delivery** (Leader/Coder).
+- [x] **T005 — Independent adversarial review and PR delivery** (Leader/Coder).
   Leader reviews implementation, tests, and security against every requirement
   and independently runs appropriate checks. Coder addresses findings with the
   same TDD/review standards; repeat until no material findings remain.
   Acceptance: one PR to `main` with exact reviewed revision, behavior changes,
   tests, platform evidence, and limitations. No merge or release publication.
   Verify: leader review and PR link recorded on QQ-9. Dependency: T004.
+  Evidence: final independent review passed for `a97429204b908b127885a490c570e116b50dcd55`
+  in QQ-9 comment `01a1c40f-1860-71a9-8b78-0e02491b28e3` (2026-11-10 UTC),
+  with all reported findings resolved and 39 unit plus 28 process tests passing.
 
-- [ ] **T006 — Human acceptance** (Qian Qiao; HumanReviewer).
+- [x] **T006 — Human acceptance** (Qian Qiao; HumanReviewer).
   Leader requests final review after validating the complete delivery and sets
   parent issue to `in_review`. Address feedback until explicitly accepted.
   Verify: acceptance on QQ-9; `done` stays human-owned. Dependency: T005.
+  Evidence: Qian Qiao confirmed the PR merge in QQ-9 comment
+  `01a1c65b-36aa-7116-ac56-db89f71e68e2` and wrote "done, you may now close
+  this issue" in `01a1c66c-7fd1-7e8d-8022-77eead15020b` (2026-11-10 UTC).
 
 ## Implementation & Verification Evidence (T002–T004)
 

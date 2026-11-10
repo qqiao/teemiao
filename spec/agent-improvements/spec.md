@@ -2,7 +2,14 @@
 
 **Issue:** QQ-9 — Agent sub command improvement
 
-**Status:** Draft; awaiting Qian Qiao's explicit approval of specification, plan, and tasks
+**Status:** Historical; implementation reviewed, merged, and accepted
+
+Leader review passed at `a97429204b908b127885a490c570e116b50dcd55` (QQ-9 comment
+`01a1c40f-1860-71a9-8b78-0e02491b28e3`). Qian Qiao confirmed merging
+[PR #26](https://github.com/qqiao/teemiao/pull/26) in comment
+`01a1c65b-36aa-7116-ac56-db89f71e68e2` and authorized issue closure in
+`01a1c66c-7fd1-7e8d-8022-77eead15020b` (2026-11-10 UTC).
+The original requirements below remain a historical record of `0.2.1`.
 
 **Date:** 2026-11-09
 

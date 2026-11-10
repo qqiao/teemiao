@@ -1,123 +1,106 @@
 # Teemiao
 
-Teemiao is a versatile toolkit designed to streamline application development
-workflows.
+Teemiao (`teemiao`) is a Rust command-line tool for generating Git build metadata files (`build-info`) and discovering or updating installed AI coding-agent CLIs on `PATH` (`agents`).
+
+- **Repository:** <https://github.com/qqiao/teemiao>
+- **Issue Tracker:** <https://github.com/qqiao/teemiao/issues>
+- **License:** [Apache License 2.0](LICENSE)
+
+## Documentation Index
+
+| Document | Contents |
+|---|---|
+| [CLI Reference (`docs/cli.md`)](docs/cli.md) | Command synopsis, verbosity flags (`-v`/`-q`), `build-info` positional syntax, JSON schema (`revision`, `build_time`), exit-status limitations, `config-template` status, and `en` / `zh-CN` localization rules. |
+| [AI Coding-Agent CLI Reference (`docs/agents.md`)](docs/agents.md) | Supported agent catalog (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`), ownership and channel verification, `--dry-run`, output streams, probe limits, exit codes, and troubleshooting. |
+| [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md) | Repository layout, local prerequisites, isolated fake-tool testing rules, required verification commands, CI matrix, and release-preparation checklist. |
+| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Release notes for `0.2.2`. |
+| [Quality Constraints (`CONSTRAINTS.md`)](CONSTRAINTS.md) | Mandatory quality, safety, process-containment, and verification floor. |
 
 ## Features
 
 ### Build Information Generator (`build-info`)
 
-Automatically generates structured metadata about your build process in JSON
-format. The generated information includes:
+Reads the Git repository in the current working directory and writes a pretty-printed JSON file containing:
 
-- Build timestamp
-- Git revision hash
-- Additional contextual build data
+- `revision` — Shortened `HEAD` commit hash (`String`)
+- `build_time` — UTC Unix timestamp in seconds (`i64`)
 
-This feature enables better traceability and version management for your
-deployments.
+See [`docs/cli.md#build-information-generator-teemiao-build-info`](docs/cli.md#build-information-generator-teemiao-build-info) for the exact JSON schema, repository-root and parent-directory requirements, overwrite behavior, and error/exit-code semantics.
 
 ### AI Coding-Agent CLI Manager (`agents`)
 
-Discovers and updates supported AI coding-agent command-line tools resolved from
-the current process `PATH` without touching desktop applications, IDE extensions,
-or unowned installations:
+Discovers and updates supported AI coding-agent CLIs resolved from the current process `PATH` without touching desktop applications, IDE extensions, or unverified installations:
 
-- **`teemiao agents list`** — Inspects `PATH` in catalog order and reports each
-  detected coding-agent CLI's canonical identifier, version, executable path, and
-  verified update method without performing network update checks.
-- **`teemiao agents update [AGENT] [--dry-run]`** — Updates one specified agent
-  (or every detected agent sequentially when `AGENT` is omitted) using the
-  verified installation owner and preserving the active release channel. Each
-  attempted agent's diagnostics are grouped under a
-  `--- [<index>/<total>] <Name> (<id>) ---` header flushed to `stderr` before the
-  updater runs, and final per-agent outcomes are printed under a separated
-  `Update summary` (`更新摘要` in `zh-CN`) heading on `stdout`.
+- **`teemiao agents list`** — Inspects `PATH` in deterministic catalog order (`codex`, `antigravity`, `opencode`, `kimi`, `cursor`, `claude-code`, `qoder`) and reports each detected CLI's version, executable path, and verified update method.
+- **`teemiao agents update [AGENT] [--dry-run]`** — Previews (`--dry-run`) or executes updates for one named agent or all detected agents sequentially, preserving the active installation owner and release channel.
 
 #### Supported Agents and Update Methods
 
-| Display Name | Canonical ID | CLI Aliases | Probed Executables on `PATH` | Supported Automated Update Paths |
-|---|---|---|---|---|
-| Codex | `codex` | — | `codex` | `npm install -g --prefix <prefix> @openai/codex@latest`, `brew upgrade --cask codex` (or formula when formula-owned), or official standalone installer (`https://chatgpt.com/codex/install.sh` on Unix / `install.ps1` on Windows) |
-| Antigravity | `antigravity` | `agy` | `agy` | `agy update` |
-| OpenCode | `opencode` | — | `opencode` | `opencode upgrade` |
-| Kimi | `kimi` | — | `kimi` | `kimi upgrade --yes` |
-| Cursor | `cursor` | — | `agent` (verified Cursor identity), `cursor-agent` | `agent update` or `cursor-agent update` |
-| Claude Code | `claude-code` | `claude` | `claude` | `claude update` (native), `npm install -g --prefix <prefix> @anthropic-ai/claude-code@latest`, `brew upgrade --cask <cask-token>`, or `winget upgrade --exact --id Anthropic.ClaudeCode ...` |
-| Qoder | `qoder` | `qodercli` | `qodercli`, `qoder` (verified Qoder CLI identity) | `qodercli update` / `qoder update` (verified native CLI) or `npm install -g --prefix <prefix> @qoder-ai/qodercli@latest` |
+Teemiao supports seven coding-agent CLIs in catalog order: **Codex** (`codex`), **Antigravity** (`antigravity` / `agy`), **OpenCode** (`opencode`), **Kimi** (`kimi`), **Cursor** (`cursor`, via verified `agent` or `cursor-agent`), **Claude Code** (`claude-code` / `claude`), and **Qoder** (`qoder` / `qodercli`).
+
+For the full catalog table, candidate executable precedence, and per-manager update commands (`native`, `npm`, `Homebrew`, `WinGet`, and `Codex` standalone installer), see [`docs/agents.md#supported-agents-catalog`](docs/agents.md#supported-agents-catalog).
 
 #### Discovery and Safety Boundaries
 
-- **`PATH`-only active CLI discovery:** Only runnable executables on the current
-  process `PATH` are inspected. Desktop applications (`cursor`, `antigravity`,
-  `Qoder Desktop` / `Qoder IDE`) and editor extensions are never launched as
-  managed CLIs. Generic `agent` binaries on `PATH` must pass Cursor CLI
-  identity/metadata verification before being classified as Cursor, and Qoder
-  prefers `qodercli` before falling back to a `qoder` binary that provides
-  corroborating Qoder CLI evidence beyond a bare product/version string.
-- **No implicit new installations:** Updating an absent tool exits with code `1`
-  and never installs a new agent. Bulk updates (`teemiao agents update`) only act
-  on agents currently discovered on `PATH`.
-- **Ownership and channel preservation:** Package-managed installations (`npm`,
-  Homebrew, WinGet) are matched to the active executable's resolved path and
-  prefix. Installations managed by unsupported package managers (such as system
-  `apt`/`dnf`/`pacman`, `pnpm`, `bun`, `scoop`, `choco`, or `nix`), ambiguous
-  multi-manager installations, legacy migrations, or pinned/prerelease channels
-  that cannot be preserved automatically are reported as `manual action required`
-  with actionable guidance (never executing vendor installer scripts for Qoder or
-  migrating an npm-owned installation to native self-update).
-- **Separated per-agent update output:** During `teemiao agents update`, each
-  attempted agent's section header (`--- [<index>/<total>] <Name> (<id>) ---`) is
-  flushed to `stderr` before any probe warnings or updater output, blank lines
-  separate consecutive agent sections, and `stdout` prints a separated
-  `Update summary` (`更新摘要`) heading followed by one outcome row per attempted
-  agent.
-- **Bounded probes:** Version/identity probes run with `CI=1` and
-  `DISABLE_AUTOUPDATER=1`, a 5-second timeout, and a 64 KiB per-stream output cap
-  so hung or noisy tools do not block discovery of other agents.
+- **Active `PATH` discovery only:** Only runnable executables on the current process `PATH` are inspected; desktop app bundles and editor extensions are excluded.
+- **Verified update selection and channel preservation:** Package-managed updates (`npm`, `Homebrew`, `WinGet`), Codex standalone updates, and Claude Code / Qoder native updates require positive local path, package, or `--help` proof. Dedicated self-updating CLIs use agent-specific checks: Antigravity and Cursor reject npm/Homebrew paths, while OpenCode and Kimi allow those paths and reject known legacy installations. Unsupported ownership or channel combinations report `manual action required`; see the per-agent rules in the guide.
+- **Bounded probes (not an OS sandbox):** Discovery probes use a 5-second timeout, a 64 KiB per-stream capture cap, and child environment overrides (`CI=1`, `DISABLE_AUTOUPDATER=1`, etc.), but executing an external binary on `PATH` is not a sandbox or a universal no-network guarantee.
+
+See [`docs/agents.md#ownership-resolution-and-channel-preservation-rules`](docs/agents.md#ownership-resolution-and-channel-preservation-rules) and [`docs/agents.md#probe-safeguards-and-security-boundaries`](docs/agents.md#probe-safeguards-and-security-boundaries) for complete details.
 
 ## Current Status
 
-The project currently provides Git build-info generation (`build-info`) and AI
-coding-agent CLI discovery and updates (`agents`). Support for additional version
-control systems and configuration templates is planned for future releases.
+| Subcommand | Status | Notes |
+|---|---|---|
+| `teemiao build-info [FILE]` | Implemented | Requires invocation from a Git repository root with a valid `HEAD` commit and an existing output parent directory. Generation errors print to `stderr` while the process currently exits `0` ([details](docs/cli.md#operational-requirements-and-limitations)). |
+| `teemiao agents list` | Implemented | Inspects `PATH` and prints detected agents to `stdout` (`0` exit code). |
+| `teemiao agents update [AGENT] [--dry-run]` | Implemented | Updates one or all detected agents on `PATH` with separated `stderr` diagnostics and a `stdout` summary ([details](docs/agents.md#output-streams-and-formatting)). |
+| `teemiao config-template` | **Unfinished (panics)** | Placeholder subcommand; running `teemiao config-template` executes `todo!("config template")` and panics ([details](docs/cli.md#unfinished-command-teemiao-config-template)). |
 
 ## Getting Started
 
 ### Installation
 
-You can install Teemiao using Cargo:
+Install the published binary from [crates.io](https://crates.io/crates/teemiao) with Cargo:
 
-```bash
-cargo install teemiao
+```sh
+cargo install teemiao --locked
+```
+
+Or build and install from a source checkout (requires a Rust toolchain supporting the 2024 edition):
+
+```sh
+git clone https://github.com/qqiao/teemiao.git
+cd teemiao
+cargo install --path . --locked
 ```
 
 ### Usage
 
-Generate build information for your project:
+Write build metadata to the default `./build_info.json` or an explicit file path (from a Git repository root):
 
-```bash
+```sh
 teemiao build-info
+teemiao build-info build_info.json
 ```
 
-List installed AI coding-agent CLIs on `PATH`:
+List installed AI coding-agent CLIs discovered on `PATH`:
 
-```bash
+```sh
 teemiao agents list
 ```
 
 Preview planned update commands without modifying installed software:
 
-```bash
+```sh
 teemiao agents update --dry-run
 teemiao agents update codex --dry-run
 teemiao agents update qoder --dry-run
 ```
 
-Update a single coding-agent CLI (by canonical ID or alias) or all detected
-coding-agent CLIs on `PATH`:
+Update a single coding-agent CLI (by canonical ID or alias) or all detected coding-agent CLIs on `PATH`:
 
-```bash
+```sh
 teemiao agents update antigravity
 teemiao agents update agy
 teemiao agents update claude
@@ -126,39 +109,30 @@ teemiao agents update qodercli
 teemiao agents update
 ```
 
+Display localized help in English or Simplified Chinese (`LC_ALL` -> `LC_MESSAGES` -> `LANG`):
+
+```sh
+LC_ALL=en_US.UTF-8 teemiao --help
+LC_ALL=zh_CN.UTF-8 teemiao --help
+```
+
 #### Exit Codes (`teemiao agents`)
 
-- `0` — Discovery succeeded, `--dry-run` completed for installable plans, or all
-  selected agent updates were verified as `updated` or `up to date`.
-- `1` — One or more selected agents were not installed on `PATH`, required
-  manual action, failed to update, or could not be verified after the updater
-  exited.
-- `2` — Invalid CLI arguments or unknown agent identifier (rejected by `clap`
-  before any updater runs).
-- `130` — Update interrupted/cancelled (such as `SIGINT` / `Ctrl-C`); subsequent
-  queued updates are not started.
+- `0` — `agents list` completed, bulk `agents update` found no installed agents, `--dry-run` succeeded for all selected agents, or all selected updates finished as `updated` / `up to date`.
+- `1` — Named agent is not installed on `PATH`, or one or more selected agents resulted in `manual action required`, `unverified`, or `failed`.
+- `2` — Invalid CLI arguments or unknown agent identifier rejected by `clap`.
+- `130` — Update interrupted (`SIGINT` / `SIGTERM`); remaining queued agents are not started.
+
+See [`docs/cli.md#exit-codes-summary`](docs/cli.md#exit-codes-summary) and [`docs/agents.md#exit-codes`](docs/agents.md#exit-codes) for full exit-code tables.
 
 #### Troubleshooting
 
-- **Installed agent does not appear in `teemiao agents list`:** Ensure the
-  directory containing the agent's CLI executable (for example `~/.local/bin`,
-  `~/.opencode/bin`, or your global `npm` bin directory) is exported on `PATH` in
-  your shell profile.
-- **`manual action required` reported during `teemiao agents update`:** Read the
-  reported reason and guidance on `stderr`. Teemiao refuses to cross package
-  managers or overwrite pinned/prerelease channels when ownership cannot be
-  safely verified.
+For missing agents on `PATH`, `manual action required` guidance, and `unverified` outcomes, see [`docs/agents.md#troubleshooting`](docs/agents.md#troubleshooting).
 
 ## Contributing
 
-We welcome contributions! Please see our contributing guidelines for more
-details.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) and [CONSTRAINTS.md](CONSTRAINTS.md) before making changes, and open issues or pull requests at <https://github.com/qqiao/teemiao/issues>.
 
 ## License
 
-This project is under Apache Public License 2.0 (APL-2). For detailed
-information, please consult the LICENSE file.
-
----
-
-> **Note**: This project is under active development. For feature requests or bug reports, please open an issue in our repository.
+This project is licensed under the **Apache License 2.0** (`Apache-2.0`). See the [LICENSE](LICENSE) file for the full license text.
