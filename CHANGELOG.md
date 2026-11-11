@@ -17,7 +17,7 @@ All notable changes to `teemiao` are documented in this file.
 - Isolate installer downloads from curl configuration, restrict redirects to HTTPS, bound download time and script size, and prefer the system POSIX shell.
 - Bound post-exit output collection, reject incomplete updater evidence, and terminate timed Unix process groups without spawning an external kill command.
 - Bound ownership metadata reads and reject oversized wrapper files instead of accepting incomplete evidence.
-- Document the repository security review and dependency audit, including the remaining unmaintained localization dependency and pending CI hardening patch.
+- Harden `.github/workflows/rust.yml` with `contents: read` permissions, commit-pinned `actions/checkout` (`persist-credentials: false`), and a bounded `cargo-audit` lockfile job; document the repository security review, dependency audit, and remaining unmaintained localization dependency.
 
 ### Packaging
 

@@ -16,7 +16,7 @@ Thank you for contributing to Teemiao! Before writing code or documentation, rea
 | `docs/cli.md`, `docs/agents.md` | User-facing CLI and AI coding-agent reference guides. |
 | `spec/` | Feature specifications, implementation plans, task checklists, and audit records (`spec/agents/`, `spec/agent-improvements/`, `spec/documentation-review/`). |
 | `.agents/skills/`, `skills-lock.json` | Bundled workflow skills (externally maintained upstream resources from `addyosmani/agent-skills`). |
-| `.github/workflows/rust.yml` | GitHub Actions workflow running across `ubuntu-latest`, `macos-latest`, and `windows-latest`. |
+| `.github/workflows/rust.yml` | GitHub Actions workflow running across `ubuntu-latest`, `macos-latest`, and `windows-latest`, plus a bounded `cargo-audit` lockfile check. |
 
 ## Local Prerequisites
 
@@ -82,7 +82,7 @@ Each job runs:
 4. `cargo build --locked --verbose`
 5. `cargo test --locked --verbose`
 
-For dependency security, install `cargo-audit 0.23.0` with `cargo install cargo-audit --version 0.23.0 --locked`, then run `cargo audit` against the project lockfile. The unmaintained localization dependency and a prepared CI hardening patch are documented in [`docs/security-review.md`](docs/security-review.md). The workflow patch still requires a maintainer credential with GitHub's `workflow` permission; the existing CI matrix does not yet run the audit automatically.
+For dependency security, `.github/workflows/rust.yml` also runs a separate `audit` job on `ubuntu-latest` (`timeout-minutes: 20`) that installs `cargo-audit 0.23.0` with `cargo install cargo-audit --version 0.23.0 --locked` and runs `cargo audit` against `Cargo.lock`; run the same commands locally before opening or updating a pull request. Workflow hardening (`contents: read` permissions and commit-pinned `actions/checkout` with `persist-credentials: false`) and the deferred unmaintained localization dependency are documented in [`docs/security-review.md`](docs/security-review.md).
 
 When reporting verification results on an issue or pull request, state the local OS/architecture and toolchain you actually ran, and report external GitHub Actions runs accurately (e.g., pending vs. completed per platform). Never claim a platform passed based on compilation on another OS alone.
 
