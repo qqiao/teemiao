@@ -2,6 +2,28 @@
 
 All notable changes to `teemiao` are documented in this file.
 
+## [0.2.3] — Unreleased (Prepared)
+
+### Fixed
+
+- Allow stable standalone Codex updates when the official installer records a platform suffix in its release name and update marker; continue requiring manual action for pinned, prerelease, or unreadable channel metadata.
+- Recognize GNU Linux package target suffixes and reject stale update markers after the selected Codex release changes, including replacement builds reporting the same version.
+- Recognize successful standalone Codex updates that emit known non-fatal cleanup warnings while retaining the warnings in diagnostics and preserving failure and version-verification checks.
+
+### Security
+
+- Validate Windows batch-command arguments at every subprocess boundary, including WinGet probes and Codex installer tools.
+- Require a verified Codex version and agreement between the active launcher, current selection, manifest, and automatic-update marker.
+- Isolate installer downloads from curl configuration, restrict redirects to HTTPS, bound download time and script size, and prefer the system POSIX shell.
+- Bound post-exit output collection, reject incomplete updater evidence, and terminate timed Unix process groups without spawning an external kill command.
+- Bound ownership metadata reads and reject oversized wrapper files instead of accepting incomplete evidence.
+- Upgrade `rust-i18n` from `3.1.5` to `4.2.4` (`rust-i18n = "4.2.4"`) to remove unmaintained `unsafe-libyaml 0.2.11` (`RUSTSEC-2024-0449`) and deprecated `serde_yaml` across all dependency edges while preserving English and Simplified Chinese YAML catalogs and CLI localization behavior.
+- Harden `.github/workflows/rust.yml` with `contents: read` permissions, commit-pinned `actions/checkout` (`persist-credentials: false`), and a bounded `cargo-audit` lockfile job enforcing `cargo audit --deny warnings`; document the repository security review and dependency supply-chain audit in [`docs/security-review.md`](docs/security-review.md).
+
+### Packaging
+
+- Prepare patch version `0.2.3`, updating only the `rust-i18n` localization dependency subgraph to `4.2.4` and declaring the already-locked `libc` directly on Unix for process-group termination. Publication and release tagging remain pending maintainer approval.
+
 ## [0.2.2] — Unreleased (Prepared)
 
 > **Status:** Prepared in repository; not yet published to [crates.io](https://crates.io/crates/teemiao) or tagged as a GitHub release until maintainer release approval.

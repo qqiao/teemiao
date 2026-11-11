@@ -63,10 +63,13 @@ Teemiao never guesses a package-manager owner from the mere presence of `npm`, `
    - **npm (`@openai/codex`):** Selected when the launcher or its verified wrapper/symlink target resolves inside a global npm prefix (`<prefix>/lib/node_modules/@openai/codex`, or `<prefix>/node_modules/@openai/codex` on Windows) with a matching `package.json` name, version, and `bin` entry point (`is_local_node_modules_bin_launcher` excludes project-local `node_modules/.bin` launchers from global npm ownership). Requires `npm` on `PATH`.
    - **Homebrew cask / formula:** Selected when the launcher or symlink/wrapper target resolves inside `<brew_prefix>/Caskroom/codex*` or `<brew_prefix>/Cellar/codex`, a matching `brew` binary for `<brew_prefix>` is verified via `brew --prefix`, and the token is present in `brew list --cask` or `brew list --formula`.
    - **Official standalone installer:** Selected when the launcher resolves into `<codex_home>/packages/standalone/...` (or resides in `CODEX_INSTALL_DIR` / `~/.local/bin` on Unix / `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` on Windows alongside verified standalone metadata in `CODEX_HOME` or `~/.codex`).
-     - Downloads the fixed platform script (`https://chatgpt.com/codex/install.sh` or `https://chatgpt.com/codex/install.ps1`) via `curl --fail --silent --show-error --location --proto =https --tlsv1.2 -o <script>` into a private temporary directory (`0700` on Unix).
-     - Validates before execution that the downloaded script is a regular, non-symlink UTF-8 file containing `CODEX_INSTALL_DIR`, `CODEX_HOME`, and `installed successfully` (and starting with `#!/bin/sh` on Unix).
-     - Executes `sh <script>` on Unix or `powershell`/`pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <script>` on Windows with `CODEX_NON_INTERACTIVE=1`, `CODEX_INSTALL_DIR=<bin_dir>`, `CODEX_HOME=<codex_home>`, and `CI=1`.
-   - **Manual action required:** Unproven standalone/package ownership (including project-local `node_modules/.bin` launchers on `PATH`), WinGet installations, prerelease npm versions, pinned/prerelease standalone channels (`auto-update-version` or non-`latest`/`stable` channel in `codex-package.json`), `CODEX_INSTALL_DIR` mismatch against the active launcher directory, or contradictory signals across multiple managers.
+     - Downloads the fixed platform script (`https://chatgpt.com/codex/install.sh` or `https://chatgpt.com/codex/install.ps1`) via `curl -q --fail --silent --show-error --location --proto =https --proto-redir =https --tlsv1.2 --max-filesize 1048576 --connect-timeout 15 --max-time 120 -o <script>` into a private temporary directory (`0700` on Unix). `-q` disables curl configuration files; the download process has a 125-second deadline.
+     - Validates before execution that the downloaded script is a regular, non-symlink UTF-8 file no larger than 1 MiB containing `CODEX_INSTALL_DIR`, `CODEX_HOME`, and `installed successfully` (and starting with `#!/bin/sh` on Unix).
+     - Executes `/bin/sh <script>` on Unix (falling back to `sh` on `PATH` only when `/bin/sh` is absent) or `powershell`/`pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <script>` on Windows with `CODEX_NON_INTERACTIVE=1`, `CODEX_INSTALL_DIR=<bin_dir>`, `CODEX_HOME=<codex_home>`, and `CI=1`.
+     - Recognizes the installer's `<version>-<platform-target>` release directories and `auto-update-version` marker. The platform suffix does not indicate a prerelease. An explicit `--release <version>` installation removes this marker, so missing, unreadable, or malformed markers require manual action.
+     - A successful version probe, readable current manifest, and matching active selection are required. Missing/broken `current`, a stale marker, or disagreement between the launcher (including a verified wrapper target), current directory, manifest, and marked release requires manual action. Repointing either the launcher or `current` does not opt another build into automatic updates, even if its version is unchanged. Legacy layouts with a real `current` directory remain supported when no marked release directory exists and the other evidence agrees. Both musl and GNU Linux package target suffixes are recognized.
+     - Retains known non-fatal cleanup warnings in diagnostics without rejecting a successful same-version install. A successful exit, a matching active installation/version, and affirmative updater output are still required; warning-only output and actual failures do not confirm success.
+   - **Manual action required:** Unproven standalone/package ownership (including project-local `node_modules/.bin` launchers on `PATH`), WinGet installations, prerelease npm versions, pinned/prerelease standalone channels (missing or invalid `auto-update-version`, a prerelease version, or a non-`latest`/`stable` channel in `codex-package.json`), `CODEX_INSTALL_DIR` mismatch against the active launcher directory, or contradictory signals across multiple managers.
 
 2. **Antigravity (`antigravity` / `agy`)**
    - Only `agy` on `PATH` is inspected; `antigravity` desktop launchers are ignored.
@@ -138,13 +141,32 @@ Teemiao distinguishes between tools that are **absent** from `PATH` and installa
     - `Failed`: `<Name> (<id>): failed (<reason>; path: <path>)`
     - `Interrupted`: `<Name> (<id>): interrupted (update cancelled before completion)`
 
+### Execution limits and local trust
+
+Windows `.cmd`/`.bat` paths and arguments are checked before every probe and
+update, including installer downloaders and interpreters. Shell control and
+expansion characters are refused; ordinary spaces and parentheses remain valid.
+Native executables receive argument arrays directly.
+
+Ownership manifests and markers are limited to 1 MiB. Wrapper evidence must be
+a complete text file within 8 KiB; a truncated prefix cannot prove ownership.
+After an updater exits, Teemiao allows one second for inherited output pipes to
+close. Incomplete output produces an unsuccessful, unverified result, including
+when the direct updater returned zero. Updaters themselves remain interactive
+with respect to terminal signals and have no general execution deadline.
+
+Teemiao runs installed executables and official installers with your permissions.
+Your PATH, installation directories, system trust store, and upstream installer
+remain trust boundaries. Script marker checks verify format, not authenticity.
+See [the security review](security-review.md) for coverage and remaining limits.
+
 ### Post-Update Verification Rules
 
 After an updater exits with code `0` (or WinGet's `0x8A15002B` "no applicable update" status), Teemiao re-discovers and re-probes the active executable on `PATH`:
 
 1. **`updated`:** Reported only when the updater exited `0`, the active installation still resolves to the selected installation directory/owner on `PATH`, and either the post-update version changed (`before != after`) or the initial version was `unknown` and the updater output affirmatively confirmed an update to `after`.
 2. **`up to date`:** Reported only when the active version before and after matches (or initial version was `unknown`) **and** the updater's output matches known affirmative up-to-date clauses for that owner without negation/error markers.
-3. **`unverified`:** Reported (exiting `1`) when the updater exited `0` but the post-update version probe failed/returned `unknown`, or the version did not change and the updater output did not affirmatively confirm up-to-date status.
+3. **`unverified`:** Also reported for incomplete updater output (a collection deadline or size limit was exceeded). Otherwise, reported (exiting `1`) when the updater exited `0` but the post-update version probe failed/returned `unknown`, or the version did not change and the updater output did not affirmatively confirm up-to-date status.
 
 ## Probe Safeguards and Security Boundaries
 
@@ -176,7 +198,7 @@ Every discovery, version, help, and package-manager inventory probe runs through
   - Check the `reason` and `guidance` printed on `stderr` and under `Update summary`.
   - Common causes include:
     - The active Codex binary on `PATH` comes from a **project-local `node_modules/.bin` directory** rather than a global npm prefix (`<prefix>/bin` on Unix or `<prefix>` on Windows). Teemiao still discovers and lists this launcher with `update: manual action required (...)` (`agents list` exits `0`), but `detect_npm_ownership` rejects it as a global npm install so `teemiao agents update codex [--dry-run]` reports `manual action required` and exits `1` instead of running `npm install -g`. This also affects bulk `teemiao agents update` when the project-local entry earlier on `PATH` shadows a global Codex installation. Other agents follow their per-agent ownership rules above; OpenCode and Kimi can select their native updater from a project-local path.
-    - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a pinned Codex `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`.
+    - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a standalone Codex installation without `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`. A marker such as `0.167.0-aarch64-apple-darwin` identifies a stable release for that platform and permits automatic updates.
     - Multiple package managers or stale wrappers match the binary (`contradictory ownership metadata detected`). Remove duplicate wrappers or stale global installs so only one manager owns the active binary on `PATH`.
     - The owning package manager (`npm`, `brew`, or `winget`) is not on the current `PATH`.
     - For Qoder (`qoder` / `qodercli`), native self-update requires `--help` to advertise `update`, and Homebrew/WinGet Qoder installations must be upgraded directly with `brew` or `winget`.

@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -18,7 +21,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-11
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain components
         run: rustup component add rustfmt clippy
       - name: Check formatting
@@ -29,3 +34,15 @@ jobs:
         run: cargo build --locked --verbose
       - name: Run tests
         run: cargo test --locked --verbose
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved 2026-11-11
+        with:
+          persist-credentials: false
+      - name: Install locked audit tool
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: Audit dependency lockfile
+        run: cargo audit --deny warnings

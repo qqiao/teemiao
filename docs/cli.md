@@ -26,7 +26,7 @@ Running `teemiao` with no arguments prints help to `stderr` and exits with statu
 | `-v`, `--verbose`... | Increase log verbosity (`-v` = `INFO`, `-vv` = `DEBUG`, `-vvv` = `TRACE`). |
 | `-q`, `--quiet`... | Decrease log verbosity (`-q` = `ERROR` only, `-qq` = logging disabled). |
 | `-h`, `--help` | Print short (`-h`) or long (`--help`) localized help information. |
-| `-V`, `--version` | Print `teemiao <version>` (`teemiao 0.2.2`) to `stdout`. |
+| `-V`, `--version` | Print `teemiao <version>` (`teemiao 0.2.3`) to `stdout`. |
 
 ### Logging and Verbosity
 

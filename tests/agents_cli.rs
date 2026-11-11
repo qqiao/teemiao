@@ -24,21 +24,44 @@ fn setup_codex_standalone(
     sb: &TestSandbox,
     version: &str,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
-    let release_dir = sb
-        .home
-        .join(".codex")
-        .join("packages")
-        .join("standalone")
-        .join("releases")
-        .join(version);
+    let target = if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "aarch64-apple-darwin"
+    };
+    setup_codex_standalone_target(sb, version, target)
+}
+
+fn setup_codex_standalone_target(
+    sb: &TestSandbox,
+    version: &str,
+    target: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let release_name = if target.is_empty() {
+        version.to_string()
+    } else {
+        format!("{version}-{target}")
+    };
+    let standalone = sb.home.join(".codex/packages/standalone");
+    let release_dir = if cfg!(unix) {
+        standalone.join("releases").join(&release_name)
+    } else {
+        standalone.join("current")
+    };
     fs::create_dir_all(&release_dir).unwrap();
     fs::write(
         release_dir.join("codex-package.json"),
-        format!(r#"{{"version":"{version}","channel":"stable"}}"#),
+        format!(r#"{{"layoutVersion":1,"version":"{version}","target":"{target}"}}"#),
     )
     .unwrap();
+    fs::write(standalone.join("auto-update-version"), &release_name).unwrap();
     #[cfg(unix)]
     {
+        let current = standalone.join("current");
+        if fs::symlink_metadata(&current).is_ok() {
+            fs::remove_file(&current).unwrap();
+        }
+        std::os::unix::fs::symlink(&release_dir, current).unwrap();
         let release_bin_dir = release_dir.join("bin");
         let (target_bin, cfg_path) = sb.install_fake_tool_in(
             &release_bin_dir,
@@ -57,6 +80,187 @@ fn setup_codex_standalone(
             "codex",
             &[("version_stdout", &format!("codex-cli {version}"))],
         )
+    }
+}
+
+fn write_unix_installer_fixture(sb: &TestSandbox, payload: &std::path::Path, tool: &str) {
+    if cfg!(unix) {
+        let executable = sb
+            .bin_dir
+            .join(tool)
+            .to_string_lossy()
+            .replace('\'', "'\"'\"'");
+        fs::write(payload, format!("#!/bin/sh\n# CODEX_HOME CODEX_INSTALL_DIR installed successfully\nexec '{executable}' \"$@\"\n")).unwrap();
+    }
+}
+
+#[test]
+fn codex_standalone_release_markers_preserve_update_channels() {
+    for (version, marker, automatic) in [
+        ("0.167.0", Some("0.167.0-aarch64-apple-darwin\n"), true),
+        ("0.167.0", Some("0.167.0-x86_64-apple-darwin"), true),
+        ("0.167.0", Some("0.167.0-aarch64-unknown-linux-musl"), true),
+        ("0.167.0", Some("0.167.0-x86_64-unknown-linux-musl"), true),
+        ("0.167.0", Some("0.167.0-aarch64-unknown-linux-gnu"), true),
+        ("0.167.0", Some("0.167.0-x86_64-unknown-linux-gnu"), true),
+        ("0.167.0", Some("0.167.0-x86_64-pc-windows-msvc"), true),
+        ("0.167.0", Some("0.167.0-aarch64-pc-windows-msvc"), true),
+        ("0.167.0", Some("0.167.0"), true),
+        ("0.167.0", Some("0.166.0-aarch64-apple-darwin"), false),
+        ("0.167.0", None, false),
+        ("0.167.0", Some(""), false),
+        ("0.167.0", Some("not-a-version"), false),
+        ("0.167.0", Some("0.167.0-unknown-platform"), false),
+        (
+            "0.167.0",
+            Some("0.167.0-beta.1-aarch64-apple-darwin"),
+            false,
+        ),
+        (
+            "0.167.0-preview.1",
+            Some("0.167.0-aarch64-apple-darwin"),
+            false,
+        ),
+    ] {
+        let sb = TestSandbox::new();
+        if automatic {
+            let suffix = marker
+                .unwrap()
+                .trim()
+                .strip_prefix(version)
+                .unwrap()
+                .trim_start_matches('-');
+            setup_codex_standalone_target(&sb, version, suffix);
+        } else {
+            setup_codex_standalone(&sb, version);
+        }
+        let marker_path = sb
+            .home
+            .join(".codex/packages/standalone/auto-update-version");
+        if let Some(marker) = marker {
+            fs::write(marker_path, marker).unwrap();
+        } else {
+            fs::remove_file(marker_path).unwrap();
+        }
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(if automatic { 0 } else { 1 }),
+            "{version}, {marker:?}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            !automatic,
+            "{marker:?}: {stdout}"
+        );
+        assert!(
+            sb.invocations()
+                .iter()
+                .all(|line| line.starts_with("TOOL=codex|")),
+            "dry-run must only probe Codex: {:?}",
+            sb.invocations()
+        );
+    }
+}
+
+#[test]
+fn codex_standalone_current_manifest_must_match_update_marker() {
+    for (version, target, channel, automatic) in [
+        ("0.167.0", "aarch64-apple-darwin", "stable", true),
+        ("0.166.0", "aarch64-apple-darwin", "stable", false),
+        ("0.167.0", "x86_64-apple-darwin", "stable", false),
+        ("0.167.0", "aarch64-apple-darwin", "beta", false),
+    ] {
+        let sb = TestSandbox::new();
+        setup_codex_standalone_target(&sb, "0.167.0", "aarch64-apple-darwin");
+        let standalone = sb.home.join(".codex/packages/standalone");
+        fs::write(
+            standalone.join("auto-update-version"),
+            "0.167.0-aarch64-apple-darwin",
+        )
+        .unwrap();
+        fs::create_dir_all(standalone.join("current")).unwrap();
+        fs::write(
+            standalone.join("current/codex-package.json"),
+            format!(r#"{{"version":"{version}","target":"{target}","channel":"{channel}"}}"#),
+        )
+        .unwrap();
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(if automatic { 0 } else { 1 }),
+            "{version}, {target}, {channel}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            !automatic,
+            "{stdout}"
+        );
+        assert!(
+            sb.invocations()
+                .iter()
+                .all(|line| line.starts_with("TOOL=codex|"))
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn codex_standalone_repointed_current_requires_matching_marker() {
+    let sb = TestSandbox::new();
+    let (launcher, _) = setup_codex_standalone(&sb, "0.167.0");
+    let original = fs::canonicalize(&launcher)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let standalone = sb.home.join(".codex/packages/standalone");
+    let selected = standalone.join("current");
+    let local_release = standalone.join("releases/local-custom-aarch64-apple-darwin");
+    sb.install_fake_tool_in(
+        &local_release.join("bin"),
+        "codex",
+        &[("version_stdout", "codex-cli 0.167.0")],
+    );
+    fs::copy(
+        original.join("codex-package.json"),
+        local_release.join("codex-package.json"),
+    )
+    .unwrap();
+    fs::remove_file(&launcher).unwrap();
+    std::os::unix::fs::symlink(selected.join("bin/codex"), &launcher).unwrap();
+    fs::remove_file(&selected).unwrap();
+    for (release, expected_code) in [(&original, 0), (&local_release, 1)] {
+        std::os::unix::fs::symlink(release, &selected).unwrap();
+        let out = sb.run_teemiao(
+            &["agents", "update", "codex", "--dry-run"],
+            &[&sb.bin_dir],
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(expected_code),
+            "{release:?}: {stdout}"
+        );
+        assert_eq!(
+            stdout.contains("manual action required"),
+            expected_code == 1,
+            "{stdout}"
+        );
+        fs::remove_file(&selected).unwrap();
     }
 }
 
@@ -83,7 +287,7 @@ fn agents_without_subcommand_displays_help_and_exits_2() {
     let ver_out = sb.run_teemiao(&["--version"], &[&sb.bin_dir], &[]);
     assert_eq!(ver_out.status.code(), Some(0));
     let ver_stdout = String::from_utf8_lossy(&ver_out.stdout);
-    assert_eq!(ver_stdout.trim(), "teemiao 0.2.2");
+    assert_eq!(ver_stdout.trim(), "teemiao 0.2.3");
 
     let update_help = sb.run_teemiao(&["agents", "update", "--help"], &[&sb.bin_dir], &[]);
     assert_eq!(update_help.status.code(), Some(0));
@@ -596,6 +800,173 @@ fn agents_update_codex_homebrew_cask_positive() {
 }
 
 #[test]
+fn codex_cleanup_warning_exemption_does_not_apply_to_native_updaters() {
+    let sb = TestSandbox::new();
+    sb.install_fake_tool(
+        "kimi",
+        &[
+            ("version_stdout", "kimi 1.0.0"),
+            ("update_stdout", "kimi is already up to date"),
+            (
+                "update_stderr",
+                "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.",
+            ),
+        ],
+    );
+    let out = sb.run_teemiao(&["agents", "update", "kimi"], &[&sb.bin_dir], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("unverified"));
+}
+
+#[test]
+fn codex_standalone_cleanup_warnings_require_verified_success() {
+    let success = "Codex CLI 0.167.0 installed successfully.";
+    let cleanup =
+        "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.";
+    let selection = "WARNING: Could not record installation selection; pruning will be skipped.";
+    for (initial_known, output, diagnostics, exit, after, expected, code) in [
+        (
+            true,
+            success,
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "up to date",
+            0,
+        ),
+        (
+            true,
+            success,
+            selection,
+            "0",
+            "codex-cli 0.167.0",
+            "up to date",
+            0,
+        ),
+        (
+            false,
+            success,
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "manual action required",
+            1,
+        ),
+        (true, "", cleanup, "0", "codex-cli 0.167.0", "unverified", 1),
+        (
+            true,
+            "Codex CLI 0.168.0 installed successfully.",
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            true,
+            success,
+            cleanup,
+            "1",
+            "codex-cli 0.167.0",
+            "failed",
+            1,
+        ),
+        (
+            true,
+            success,
+            "WARNING: Could not safely inspect old Codex releases; skipped remaining cleanup.<NL>Error: update failed",
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            false,
+            success,
+            "Error: update failed",
+            "0",
+            "codex-cli 0.167.0",
+            "manual action required",
+            1,
+        ),
+        (
+            true,
+            success,
+            "WARNING: Could not install Codex.",
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (
+            true,
+            "Codex CLI 0.167.0 not installed successfully.",
+            cleanup,
+            "0",
+            "codex-cli 0.167.0",
+            "unverified",
+            1,
+        ),
+        (true, success, cleanup, "0", "unreadable", "unverified", 1),
+    ] {
+        let sb = TestSandbox::new();
+        let (_, codex_cfg) = setup_codex_standalone(&sb, "0.167.0");
+        if !initial_known {
+            fs::write(&codex_cfg, "version_stdout=unreadable\n").unwrap();
+        }
+        let payload = sb.root.join("installer.txt");
+        fs::write(&payload, if cfg!(windows) {
+            "# CODEX_INSTALL_DIR CODEX_HOME\nWrite-Host 'Codex CLI installed successfully'\n"
+        } else {
+            "#!/bin/sh\n# CODEX_INSTALL_DIR CODEX_HOME\necho 'Codex CLI installed successfully'\n"
+        }).unwrap();
+        sb.install_fake_tool("curl", &[("curl_payload_file", &payload.to_string_lossy())]);
+        let shell = if cfg!(windows) {
+            "powershell"
+        } else {
+            "fixture-installer"
+        };
+        sb.install_fake_tool(
+            shell,
+            &[
+                ("update_stdout", output),
+                ("update_stderr", diagnostics),
+                ("update_exit", exit),
+                ("next_version_stdout", after),
+                ("target_cfg_path", &codex_cfg.to_string_lossy()),
+            ],
+        );
+        write_unix_installer_fixture(&sb, &payload, shell);
+        let out = sb.run_teemiao(&["agents", "update", "codex"], &[&sb.bin_dir], &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{output}, {diagnostics}, {after}: {stdout}\n{stderr}"
+        );
+        assert!(stdout.contains(expected), "expected {expected}: {stdout}");
+        if initial_known {
+            assert!(
+                stderr.contains(&diagnostics.replace("<NL>", "\n")),
+                "diagnostics must be retained: {stderr}"
+            );
+        } else {
+            assert!(
+                sb.invocations()
+                    .iter()
+                    .all(|line| line.starts_with("TOOL=codex|")),
+                "an unknown active version must prevent installer execution"
+            );
+        }
+        assert!(
+            !stdout.contains("WARNING:"),
+            "warnings belong on stderr: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn agents_update_codex_standalone_positive_and_negative_validation() {
     let sb = TestSandbox::new();
     let (_, codex_cfg) = setup_codex_standalone(&sb, "0.118.0");
@@ -620,13 +991,27 @@ fn agents_update_codex_standalone_positive_and_negative_validation() {
         "curl",
         &[("curl_payload_file", &valid_payload.to_string_lossy())],
     );
-    let shell_tool = if cfg!(windows) { "powershell" } else { "sh" };
+    let shell_tool = if cfg!(windows) {
+        "powershell"
+    } else {
+        "fixture-installer"
+    };
     sb.install_fake_tool(
         shell_tool,
         &[
             ("next_version_stdout", "codex-cli 0.119.0"),
             ("target_cfg_path", &codex_cfg.to_string_lossy()),
             ("update_stdout", "Installed Codex 0.119.0"),
+        ],
+    );
+
+    write_unix_installer_fixture(&sb, &valid_payload, shell_tool);
+    #[cfg(unix)]
+    sb.install_fake_tool(
+        "sh",
+        &[
+            ("update_exit", "1"),
+            ("update_stdout", "PATH sh must not run"),
         ],
     );
 
@@ -642,7 +1027,10 @@ fn agents_update_codex_standalone_positive_and_negative_validation() {
     assert!(
         invocations.iter().any(|l| {
             l.starts_with("TOOL=curl|")
-                && l.contains("--proto =https --tlsv1.2 -o")
+                && l.contains("ARGS=-q ")
+                && l.contains("--proto =https --proto-redir =https --tlsv1.2")
+                && l.contains("--max-filesize 1048576")
+                && l.contains("--connect-timeout 15 --max-time 120")
                 && l.contains("https://chatgpt.com/codex/install.")
         }),
         "expected curl download from official HTTPS URL: {invocations:?}"
@@ -2834,4 +3222,272 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
             sb_pre.invocations()
         );
     }
+}
+
+fn run_teemiao_with_clean_locale_env(
+    sb: &TestSandbox,
+    args: &[&str],
+    locale_env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> std::process::Output {
+    let teemiao_bin = env!("CARGO_BIN_EXE_teemiao");
+    let joined_path = std::env::join_paths([&sb.bin_dir]).expect("join sandbox PATH");
+    let mut cmd = std::process::Command::new(teemiao_bin);
+    cmd.args(args)
+        .current_dir(cwd.unwrap_or(&sb.root))
+        .env_clear()
+        .env("PATH", joined_path)
+        .env("HOME", &sb.home)
+        .env("USERPROFILE", &sb.home)
+        .env("LOCALAPPDATA", sb.home.join("AppData").join("Local"))
+        .env("TEEMIAO_TEST_LOG_FILE", &sb.log_file);
+
+    if cfg!(windows) {
+        if let Some(sys_root) = std::env::var_os("SystemRoot") {
+            cmd.env("SystemRoot", sys_root);
+        }
+        cmd.env("PATHEXT", ".COM;.EXE;.BAT;.CMD;.PS1");
+    }
+
+    for &(k, v) in locale_env {
+        cmd.env(k, v);
+    }
+
+    cmd.output().expect("spawn isolated teemiao process")
+}
+
+#[test]
+fn cli_localization_parity_help_messages_precedence_and_fallback() {
+    let sb_empty = TestSandbox::new();
+    let en_env = [("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")];
+    let zh_env = [("LC_ALL", "zh_CN.UTF-8"), ("LANG", "zh_CN.UTF-8")];
+
+    // 1. Root, build-info, config-template, and agents help parity (including multiline, backticks, and quotes)
+    let root_help_en = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], &en_env, None);
+    let root_help_zh = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], &zh_env, None);
+    assert_eq!(root_help_en.status.code(), Some(0));
+    assert_eq!(root_help_zh.status.code(), Some(0));
+    let root_en_str = String::from_utf8(root_help_en.stdout).unwrap();
+    let root_zh_str = String::from_utf8(root_help_zh.stdout).unwrap();
+    assert!(
+        root_en_str
+            .contains("Teemiao is a set of convenient tools for building other applications.")
+            && root_en_str.contains("Generate build information metadata in JSON format.")
+            && root_en_str.contains("Generate configuration from template (not implemented).")
+            && root_en_str.contains("Discover and update installed AI coding-agent CLIs on PATH."),
+        "unexpected English root --help: {root_en_str}"
+    );
+    assert!(
+        root_zh_str.contains("Teemiao 是一组用于构建其他应用程序的便捷工具。")
+            && root_zh_str.contains("以 JSON 格式生成构建信息元数据。")
+            && root_zh_str.contains("从模板生成配置（尚未实现）。")
+            && root_zh_str.contains("发现并更新 PATH 中已安装的 AI 编程代理命令行工具。"),
+        "unexpected zh-CN root --help: {root_zh_str}"
+    );
+
+    let bi_help_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["build-info", "--help"], &en_env, None);
+    let bi_help_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["build-info", "--help"], &zh_env, None);
+    let bi_en_str = String::from_utf8(bi_help_en.stdout).unwrap();
+    let bi_zh_str = String::from_utf8(bi_help_zh.stdout).unwrap();
+    assert!(
+        bi_en_str.contains("shortened HEAD git revision (`revision`) and UTC Unix timestamp in seconds (`build_time`).")
+            && bi_en_str.contains("If not specified, defaults to `./build_info.json` in the current working directory."),
+        "unexpected English build-info --help: {bi_en_str}"
+    );
+    assert!(
+        bi_zh_str.contains(
+            "缩短后的 HEAD git 修订版本（`revision`）和 UTC Unix 秒级时间戳（`build_time`）。"
+        ) && bi_zh_str.contains("如果未指定，默认为当前工作目录下的 `./build_info.json`。"),
+        "unexpected zh-CN build-info --help: {bi_zh_str}"
+    );
+
+    let agents_help_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "--help"], &en_env, None);
+    let agents_help_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "--help"], &zh_env, None);
+    let agents_en_str = String::from_utf8(agents_help_en.stdout).unwrap();
+    let agents_zh_str = String::from_utf8(agents_help_zh.stdout).unwrap();
+    assert!(
+        agents_en_str.contains(
+            "Discover and update active command-line coding agents (Codex, Antigravity, OpenCode, Kimi, Cursor, Claude Code, and Qoder) resolved from the current process PATH.\n\nOnly active CLI installations on PATH are inspected;"
+        ),
+        "expected multiline English agents --help: {agents_en_str}"
+    );
+    assert!(
+        agents_zh_str.contains(
+            "从当前进程的 PATH 中发现并更新活动的命令行编程代理（Codex、Antigravity、OpenCode、Kimi、Cursor、Claude Code 和 Qoder）。\n\n仅检查 PATH 中的命令行安装，不包含桌面应用和编辑器扩展。"
+        ),
+        "expected multiline zh-CN agents --help: {agents_zh_str}"
+    );
+
+    let update_help_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "--help"],
+        &en_env,
+        None,
+    );
+    let update_help_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "--help"],
+        &zh_env,
+        None,
+    );
+    let update_en_str = String::from_utf8(update_help_en.stdout).unwrap();
+    let update_zh_str = String::from_utf8(update_help_zh.stdout).unwrap();
+    assert!(
+        update_en_str.contains("'--- [<index>/<total>] <Name> (<id>) ---'")
+            && update_en_str.contains("'Update summary'")
+            && update_en_str.contains("\n\nUse --dry-run to preview the selected update command"),
+        "unexpected English agents update --help: {update_en_str}"
+    );
+    assert!(
+        update_zh_str.contains("'--- [<index>/<total>] <Name> (<id>) ---'")
+            && update_zh_str.contains("“更新摘要”")
+            && update_zh_str.contains("\n\n使用 --dry-run 可预览选定的更新命令")
+            && update_zh_str.contains("可选的要更新的代理标识符或别名。")
+            && update_zh_str.contains("运行发现和只读归属检查"),
+        "unexpected zh-CN agents update --help: {update_zh_str}"
+    );
+
+    // 2. Locale precedence (`LC_ALL` > `LC_MESSAGES` > `LANG`) and fallback (`fr_FR`, `zh_TW`, `C`, `POSIX`, unset)
+    for fallback_env in [
+        &[][..],
+        &[("LC_ALL", "C")][..],
+        &[("LC_ALL", "POSIX.UTF-8")][..],
+        &[("LC_ALL", "fr_FR.UTF-8"), ("LANG", "fr_FR.UTF-8")][..],
+        &[("LC_ALL", "zh_TW.UTF-8"), ("LANG", "zh_TW.UTF-8")][..],
+        &[
+            ("LC_ALL", ""),
+            ("LC_MESSAGES", "zh_CN.UTF-8"),
+            ("LANG", "zh_CN.UTF-8"),
+        ][..],
+    ] {
+        let fb_root = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], fallback_env, None);
+        assert_eq!(
+            String::from_utf8(fb_root.stdout).unwrap(),
+            root_en_str,
+            "fallback --help must match English byte-for-byte for env {fallback_env:?}"
+        );
+        let fb_update = run_teemiao_with_clean_locale_env(
+            &sb_empty,
+            &["agents", "update", "--help"],
+            fallback_env,
+            None,
+        );
+        assert_eq!(
+            String::from_utf8(fb_update.stdout).unwrap(),
+            update_en_str,
+            "fallback agents update --help must match English byte-for-byte for env {fallback_env:?}"
+        );
+    }
+
+    for zh_precedence_env in [
+        &[("LC_MESSAGES", "zh_cn"), ("LANG", "fr_FR.UTF-8")][..],
+        &[("LANG", "zh_CN.UTF-8")][..],
+    ] {
+        let zh_prec =
+            run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], zh_precedence_env, None);
+        assert_eq!(
+            String::from_utf8(zh_prec.stdout).unwrap(),
+            root_zh_str,
+            "zh-CN precedence --help mismatch for env {zh_precedence_env:?}"
+        );
+    }
+
+    // 3. Empty PATH, not-installed error, build-info error, and fake-agent list/dry-run parity
+    let empty_list_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "list"], &en_env, None);
+    let empty_list_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "list"], &zh_env, None);
+    assert_eq!(
+        String::from_utf8(empty_list_en.stdout).unwrap(),
+        "No supported AI coding-agent CLIs were found on PATH.\n"
+    );
+    assert_eq!(
+        String::from_utf8(empty_list_zh.stdout).unwrap(),
+        "在 PATH 中未找到受支持的 AI 编程代理 CLI。\n"
+    );
+
+    let missing_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "codex", "--dry-run"],
+        &en_env,
+        None,
+    );
+    let missing_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "codex", "--dry-run"],
+        &zh_env,
+        None,
+    );
+    assert_eq!(missing_en.status.code(), Some(1));
+    assert_eq!(missing_zh.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(missing_en.stderr).unwrap(),
+        "Error: agent 'Codex' (codex) is not installed on PATH. Teemiao only updates existing installations on PATH.\n"
+    );
+    assert_eq!(
+        String::from_utf8(missing_zh.stderr).unwrap(),
+        "错误：代理 'Codex' (codex) 未安装在 PATH 中。Teemiao 仅更新 PATH 中已有的安装。\n"
+    );
+
+    let non_git_dir = sb_empty.root.join("not_a_git_repo");
+    fs::create_dir_all(&non_git_dir).unwrap();
+    let bi_err_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["build-info", "out.json"],
+        &en_env,
+        Some(&non_git_dir),
+    );
+    let bi_err_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["build-info", "out.json"],
+        &zh_env,
+        Some(&non_git_dir),
+    );
+    assert_eq!(bi_err_en.status.code(), Some(0));
+    assert_eq!(bi_err_zh.status.code(), Some(0));
+    assert!(
+        String::from_utf8(bi_err_en.stderr)
+            .unwrap()
+            .starts_with("Error generating build info: Failed to open repository:"),
+        "unexpected English build-info error"
+    );
+    assert!(
+        String::from_utf8(bi_err_zh.stderr)
+            .unwrap()
+            .starts_with("生成构建信息时出错：Failed to open repository:"),
+        "unexpected zh-CN build-info error"
+    );
+
+    let sb_fake = TestSandbox::new();
+    let (agy_path, _) =
+        sb_fake.install_fake_tool("agy", &[("version_stdout", "Antigravity CLI 1.4.2")]);
+    let list_en = run_teemiao_with_clean_locale_env(&sb_fake, &["agents", "list"], &en_env, None);
+    let list_zh = run_teemiao_with_clean_locale_env(&sb_fake, &["agents", "list"], &zh_env, None);
+    let list_fr = run_teemiao_with_clean_locale_env(
+        &sb_fake,
+        &["agents", "list"],
+        &[("LC_ALL", "fr_FR.UTF-8")],
+        None,
+    );
+    let list_en_out = String::from_utf8(list_en.stdout).unwrap();
+    let list_zh_out = String::from_utf8(list_zh.stdout).unwrap();
+    assert_eq!(
+        list_en_out,
+        format!(
+            "Antigravity (antigravity) | version: 1.4.2 | path: {} | update: native (agy update)\n",
+            agy_path.display()
+        )
+    );
+    assert_eq!(
+        list_zh_out,
+        format!(
+            "Antigravity (antigravity) | 版本: 1.4.2 | 路径: {} | 更新方式: 原生自更新 (agy update)\n",
+            agy_path.display()
+        )
+    );
+    assert_eq!(String::from_utf8(list_fr.stdout).unwrap(), list_en_out);
 }
