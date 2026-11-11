@@ -82,7 +82,7 @@ Each job runs:
 4. `cargo build --locked --verbose`
 5. `cargo test --locked --verbose`
 
-For dependency security, `.github/workflows/rust.yml` also runs a separate `audit` job on `ubuntu-latest` (`timeout-minutes: 20`) that installs `cargo-audit 0.23.0` with `cargo install cargo-audit --version 0.23.0 --locked` and runs `cargo audit` against `Cargo.lock`; run the same commands locally before opening or updating a pull request. Workflow hardening (`contents: read` permissions and commit-pinned `actions/checkout` with `persist-credentials: false`) and the deferred unmaintained localization dependency are documented in [`docs/security-review.md`](docs/security-review.md).
+For dependency security, `.github/workflows/rust.yml` also runs a separate `audit` job on `ubuntu-latest` (`timeout-minutes: 20`) that installs `cargo-audit 0.23.0` with `cargo install cargo-audit --version 0.23.0 --locked` and runs `cargo audit --deny warnings` against `Cargo.lock`; run the same commands locally before opening or updating a pull request. Workflow hardening (`contents: read` permissions and commit-pinned `actions/checkout` with `persist-credentials: false`) and the localization dependency remediation (`F-05`) are documented in [`docs/security-review.md`](docs/security-review.md).
 
 When reporting verification results on an issue or pull request, state the local OS/architecture and toolchain you actually ran, and report external GitHub Actions runs accurately (e.g., pending vs. completed per platform). Never claim a platform passed based on compilation on another OS alone.
 

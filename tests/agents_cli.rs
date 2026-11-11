@@ -3223,3 +3223,271 @@ fn agents_qoder_update_native_npm_dry_run_partial_failure_and_unverified_guards(
         );
     }
 }
+
+fn run_teemiao_with_clean_locale_env(
+    sb: &TestSandbox,
+    args: &[&str],
+    locale_env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> std::process::Output {
+    let teemiao_bin = env!("CARGO_BIN_EXE_teemiao");
+    let joined_path = std::env::join_paths([&sb.bin_dir]).expect("join sandbox PATH");
+    let mut cmd = std::process::Command::new(teemiao_bin);
+    cmd.args(args)
+        .current_dir(cwd.unwrap_or(&sb.root))
+        .env_clear()
+        .env("PATH", joined_path)
+        .env("HOME", &sb.home)
+        .env("USERPROFILE", &sb.home)
+        .env("LOCALAPPDATA", sb.home.join("AppData").join("Local"))
+        .env("TEEMIAO_TEST_LOG_FILE", &sb.log_file);
+
+    if cfg!(windows) {
+        if let Some(sys_root) = std::env::var_os("SystemRoot") {
+            cmd.env("SystemRoot", sys_root);
+        }
+        cmd.env("PATHEXT", ".COM;.EXE;.BAT;.CMD;.PS1");
+    }
+
+    for &(k, v) in locale_env {
+        cmd.env(k, v);
+    }
+
+    cmd.output().expect("spawn isolated teemiao process")
+}
+
+#[test]
+fn cli_localization_parity_help_messages_precedence_and_fallback() {
+    let sb_empty = TestSandbox::new();
+    let en_env = [("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")];
+    let zh_env = [("LC_ALL", "zh_CN.UTF-8"), ("LANG", "zh_CN.UTF-8")];
+
+    // 1. Root, build-info, config-template, and agents help parity (including multiline, backticks, and quotes)
+    let root_help_en = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], &en_env, None);
+    let root_help_zh = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], &zh_env, None);
+    assert_eq!(root_help_en.status.code(), Some(0));
+    assert_eq!(root_help_zh.status.code(), Some(0));
+    let root_en_str = String::from_utf8(root_help_en.stdout).unwrap();
+    let root_zh_str = String::from_utf8(root_help_zh.stdout).unwrap();
+    assert!(
+        root_en_str
+            .contains("Teemiao is a set of convenient tools for building other applications.")
+            && root_en_str.contains("Generate build information metadata in JSON format.")
+            && root_en_str.contains("Generate configuration from template (not implemented).")
+            && root_en_str.contains("Discover and update installed AI coding-agent CLIs on PATH."),
+        "unexpected English root --help: {root_en_str}"
+    );
+    assert!(
+        root_zh_str.contains("Teemiao 是一组用于构建其他应用程序的便捷工具。")
+            && root_zh_str.contains("以 JSON 格式生成构建信息元数据。")
+            && root_zh_str.contains("从模板生成配置（尚未实现）。")
+            && root_zh_str.contains("发现并更新 PATH 中已安装的 AI 编程代理命令行工具。"),
+        "unexpected zh-CN root --help: {root_zh_str}"
+    );
+
+    let bi_help_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["build-info", "--help"], &en_env, None);
+    let bi_help_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["build-info", "--help"], &zh_env, None);
+    let bi_en_str = String::from_utf8(bi_help_en.stdout).unwrap();
+    let bi_zh_str = String::from_utf8(bi_help_zh.stdout).unwrap();
+    assert!(
+        bi_en_str.contains("shortened HEAD git revision (`revision`) and UTC Unix timestamp in seconds (`build_time`).")
+            && bi_en_str.contains("If not specified, defaults to `./build_info.json` in the current working directory."),
+        "unexpected English build-info --help: {bi_en_str}"
+    );
+    assert!(
+        bi_zh_str.contains(
+            "缩短后的 HEAD git 修订版本（`revision`）和 UTC Unix 秒级时间戳（`build_time`）。"
+        ) && bi_zh_str.contains("如果未指定，默认为当前工作目录下的 `./build_info.json`。"),
+        "unexpected zh-CN build-info --help: {bi_zh_str}"
+    );
+
+    let agents_help_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "--help"], &en_env, None);
+    let agents_help_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "--help"], &zh_env, None);
+    let agents_en_str = String::from_utf8(agents_help_en.stdout).unwrap();
+    let agents_zh_str = String::from_utf8(agents_help_zh.stdout).unwrap();
+    assert!(
+        agents_en_str.contains(
+            "Discover and update active command-line coding agents (Codex, Antigravity, OpenCode, Kimi, Cursor, Claude Code, and Qoder) resolved from the current process PATH.\n\nOnly active CLI installations on PATH are inspected;"
+        ),
+        "expected multiline English agents --help: {agents_en_str}"
+    );
+    assert!(
+        agents_zh_str.contains(
+            "从当前进程的 PATH 中发现并更新活动的命令行编程代理（Codex、Antigravity、OpenCode、Kimi、Cursor、Claude Code 和 Qoder）。\n\n仅检查 PATH 中的命令行安装，不包含桌面应用和编辑器扩展。"
+        ),
+        "expected multiline zh-CN agents --help: {agents_zh_str}"
+    );
+
+    let update_help_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "--help"],
+        &en_env,
+        None,
+    );
+    let update_help_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "--help"],
+        &zh_env,
+        None,
+    );
+    let update_en_str = String::from_utf8(update_help_en.stdout).unwrap();
+    let update_zh_str = String::from_utf8(update_help_zh.stdout).unwrap();
+    assert!(
+        update_en_str.contains("'--- [<index>/<total>] <Name> (<id>) ---'")
+            && update_en_str.contains("'Update summary'")
+            && update_en_str.contains("\n\nUse --dry-run to preview the selected update command"),
+        "unexpected English agents update --help: {update_en_str}"
+    );
+    assert!(
+        update_zh_str.contains("'--- [<index>/<total>] <Name> (<id>) ---'")
+            && update_zh_str.contains("“更新摘要”")
+            && update_zh_str.contains("\n\n使用 --dry-run 可预览选定的更新命令")
+            && update_zh_str.contains("可选的要更新的代理标识符或别名。")
+            && update_zh_str.contains("运行发现和只读归属检查"),
+        "unexpected zh-CN agents update --help: {update_zh_str}"
+    );
+
+    // 2. Locale precedence (`LC_ALL` > `LC_MESSAGES` > `LANG`) and fallback (`fr_FR`, `zh_TW`, `C`, `POSIX`, unset)
+    for fallback_env in [
+        &[][..],
+        &[("LC_ALL", "C")][..],
+        &[("LC_ALL", "POSIX.UTF-8")][..],
+        &[("LC_ALL", "fr_FR.UTF-8"), ("LANG", "fr_FR.UTF-8")][..],
+        &[("LC_ALL", "zh_TW.UTF-8"), ("LANG", "zh_TW.UTF-8")][..],
+        &[
+            ("LC_ALL", ""),
+            ("LC_MESSAGES", "zh_CN.UTF-8"),
+            ("LANG", "zh_CN.UTF-8"),
+        ][..],
+    ] {
+        let fb_root = run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], fallback_env, None);
+        assert_eq!(
+            String::from_utf8(fb_root.stdout).unwrap(),
+            root_en_str,
+            "fallback --help must match English byte-for-byte for env {fallback_env:?}"
+        );
+        let fb_update = run_teemiao_with_clean_locale_env(
+            &sb_empty,
+            &["agents", "update", "--help"],
+            fallback_env,
+            None,
+        );
+        assert_eq!(
+            String::from_utf8(fb_update.stdout).unwrap(),
+            update_en_str,
+            "fallback agents update --help must match English byte-for-byte for env {fallback_env:?}"
+        );
+    }
+
+    for zh_precedence_env in [
+        &[("LC_MESSAGES", "zh_cn"), ("LANG", "fr_FR.UTF-8")][..],
+        &[("LANG", "zh_CN.UTF-8")][..],
+    ] {
+        let zh_prec =
+            run_teemiao_with_clean_locale_env(&sb_empty, &["--help"], zh_precedence_env, None);
+        assert_eq!(
+            String::from_utf8(zh_prec.stdout).unwrap(),
+            root_zh_str,
+            "zh-CN precedence --help mismatch for env {zh_precedence_env:?}"
+        );
+    }
+
+    // 3. Empty PATH, not-installed error, build-info error, and fake-agent list/dry-run parity
+    let empty_list_en =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "list"], &en_env, None);
+    let empty_list_zh =
+        run_teemiao_with_clean_locale_env(&sb_empty, &["agents", "list"], &zh_env, None);
+    assert_eq!(
+        String::from_utf8(empty_list_en.stdout).unwrap(),
+        "No supported AI coding-agent CLIs were found on PATH.\n"
+    );
+    assert_eq!(
+        String::from_utf8(empty_list_zh.stdout).unwrap(),
+        "在 PATH 中未找到受支持的 AI 编程代理 CLI。\n"
+    );
+
+    let missing_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "codex", "--dry-run"],
+        &en_env,
+        None,
+    );
+    let missing_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["agents", "update", "codex", "--dry-run"],
+        &zh_env,
+        None,
+    );
+    assert_eq!(missing_en.status.code(), Some(1));
+    assert_eq!(missing_zh.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(missing_en.stderr).unwrap(),
+        "Error: agent 'Codex' (codex) is not installed on PATH. Teemiao only updates existing installations on PATH.\n"
+    );
+    assert_eq!(
+        String::from_utf8(missing_zh.stderr).unwrap(),
+        "错误：代理 'Codex' (codex) 未安装在 PATH 中。Teemiao 仅更新 PATH 中已有的安装。\n"
+    );
+
+    let non_git_dir = sb_empty.root.join("not_a_git_repo");
+    fs::create_dir_all(&non_git_dir).unwrap();
+    let bi_err_en = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["build-info", "out.json"],
+        &en_env,
+        Some(&non_git_dir),
+    );
+    let bi_err_zh = run_teemiao_with_clean_locale_env(
+        &sb_empty,
+        &["build-info", "out.json"],
+        &zh_env,
+        Some(&non_git_dir),
+    );
+    assert_eq!(bi_err_en.status.code(), Some(0));
+    assert_eq!(bi_err_zh.status.code(), Some(0));
+    assert!(
+        String::from_utf8(bi_err_en.stderr)
+            .unwrap()
+            .starts_with("Error generating build info: Failed to open repository:"),
+        "unexpected English build-info error"
+    );
+    assert!(
+        String::from_utf8(bi_err_zh.stderr)
+            .unwrap()
+            .starts_with("生成构建信息时出错：Failed to open repository:"),
+        "unexpected zh-CN build-info error"
+    );
+
+    let sb_fake = TestSandbox::new();
+    let (agy_path, _) =
+        sb_fake.install_fake_tool("agy", &[("version_stdout", "Antigravity CLI 1.4.2")]);
+    let list_en = run_teemiao_with_clean_locale_env(&sb_fake, &["agents", "list"], &en_env, None);
+    let list_zh = run_teemiao_with_clean_locale_env(&sb_fake, &["agents", "list"], &zh_env, None);
+    let list_fr = run_teemiao_with_clean_locale_env(
+        &sb_fake,
+        &["agents", "list"],
+        &[("LC_ALL", "fr_FR.UTF-8")],
+        None,
+    );
+    let list_en_out = String::from_utf8(list_en.stdout).unwrap();
+    let list_zh_out = String::from_utf8(list_zh.stdout).unwrap();
+    assert_eq!(
+        list_en_out,
+        format!(
+            "Antigravity (antigravity) | version: 1.4.2 | path: {} | update: native (agy update)\n",
+            agy_path.display()
+        )
+    );
+    assert_eq!(
+        list_zh_out,
+        format!(
+            "Antigravity (antigravity) | 版本: 1.4.2 | 路径: {} | 更新方式: 原生自更新 (agy update)\n",
+            agy_path.display()
+        )
+    );
+    assert_eq!(String::from_utf8(list_fr.stdout).unwrap(), list_en_out);
+}

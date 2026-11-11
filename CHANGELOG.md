@@ -17,11 +17,12 @@ All notable changes to `teemiao` are documented in this file.
 - Isolate installer downloads from curl configuration, restrict redirects to HTTPS, bound download time and script size, and prefer the system POSIX shell.
 - Bound post-exit output collection, reject incomplete updater evidence, and terminate timed Unix process groups without spawning an external kill command.
 - Bound ownership metadata reads and reject oversized wrapper files instead of accepting incomplete evidence.
-- Harden `.github/workflows/rust.yml` with `contents: read` permissions, commit-pinned `actions/checkout` (`persist-credentials: false`), and a bounded `cargo-audit` lockfile job; document the repository security review, dependency audit, and remaining unmaintained localization dependency.
+- Upgrade `rust-i18n` from `3.1.5` to `4.2.4` (`rust-i18n = "4.2.4"`) to remove unmaintained `unsafe-libyaml 0.2.11` (`RUSTSEC-2024-0449`) and deprecated `serde_yaml` across all dependency edges while preserving English and Simplified Chinese YAML catalogs and CLI localization behavior.
+- Harden `.github/workflows/rust.yml` with `contents: read` permissions, commit-pinned `actions/checkout` (`persist-credentials: false`), and a bounded `cargo-audit` lockfile job enforcing `cargo audit --deny warnings`; document the repository security review and dependency supply-chain audit in [`docs/security-review.md`](docs/security-review.md).
 
 ### Packaging
 
-- Prepare patch version `0.2.3` without changing dependency versions. Declare the already-locked `libc` directly on Unix for process-group termination. Publication and release tagging remain pending maintainer approval.
+- Prepare patch version `0.2.3`, updating only the `rust-i18n` localization dependency subgraph to `4.2.4` and declaring the already-locked `libc` directly on Unix for process-group termination. Publication and release tagging remain pending maintainer approval.
 
 ## [0.2.2] — Unreleased (Prepared)
 

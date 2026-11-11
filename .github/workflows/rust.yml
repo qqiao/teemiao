@@ -45,4 +45,4 @@ jobs:
       - name: Install locked audit tool
         run: cargo install cargo-audit --version 0.23.0 --locked
       - name: Audit dependency lockfile
-        run: cargo audit
+        run: cargo audit --deny warnings

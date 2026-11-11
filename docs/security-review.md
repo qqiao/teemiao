@@ -29,31 +29,42 @@ accepts no template or network input and is not a completed feature.
 | F-03: Installer transport and resource limits | Fixed ambient curl configuration, redirect scheme, unbounded script read, and interpreter precedence. Curl receives `-q` first, HTTPS-only transfer/redirect flags, a 1 MiB maximum, 15-second connection and 120-second transfer limits, and a 125-second process deadline. Validation independently bounds reads. Unix prefers `/bin/sh`; Windows retains noninteractive, no-profile PowerShell with a file argument. |
 | F-04: Inherited output pipes and timeout cleanup | Fixed indefinite post-exit joins: output draining has a one-second limit even when the updater has no execution deadline. Incomplete output cannot authorize success. Unix timed process groups use `libc::kill` instead of launching `/bin/kill`. Normal update signal behavior is preserved. |
 | Additional ownership/output evidence gaps | Fixed accepting a wrapper's first 8 KiB while ignoring later commands, whole-binary reads for Kimi wrapper detection, unbounded ownership metadata reads, and accepting truncated updater evidence. Manifests/markers are capped at 1 MiB; wrappers must fit completely within 8 KiB. |
-| CI token/action supply chain | Fixed in `.github/workflows/rust.yml`: workflow permissions are restricted to `contents: read`, `actions/checkout` is pinned to verified upstream commit `11d5960a326750d5838078e36cf38b85af677262` (`v4` / `v4.4.0`) with `persist-credentials: false`, and a bounded `audit` job (`timeout-minutes: 20`) installs locked `cargo-audit 0.23.0` and audits `Cargo.lock` alongside the preserved Linux/macOS/Windows matrix. |
-| F-05: Unmaintained YAML dependency | Deferred maintenance risk, detailed below. No known vulnerability was reported by the lockfile audit. |
+| CI token/action supply chain | Fixed in `.github/workflows/rust.yml`: workflow permissions are restricted to `contents: read`, `actions/checkout` is pinned to verified upstream commit `11d5960a326750d5838078e36cf38b85af677262` (`v4` / `v4.4.0`) with `persist-credentials: false`, and a bounded `audit` job (`timeout-minutes: 20`) installs locked `cargo-audit 0.23.0` and enforces `cargo audit --deny warnings` against `Cargo.lock` alongside the preserved Linux/macOS/Windows matrix. |
+| F-05: Unmaintained YAML dependency | Fixed. Upgraded `rust-i18n` from `3.1.5` to `4.2.4` (`rust-i18n = "4.2.4"`), removing `unsafe-libyaml 0.2.11` ([RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html)) and `serde_yaml 0.9.34+deprecated` across all normal, build, and proc-macro dependency edges, and enabled `cargo audit --deny warnings` in CI without advisory suppressions. |
 
 The subprocess policy follows Rust's [Windows argument-splitting guidance](https://doc.rust-lang.org/std/process/index.html#windows-argument-splitting).
 Download flags follow the [curl manual](https://curl.se/docs/manpage.html).
 
-## Dependency audit and deferral
+## Dependency audit and supply-chain review
 
-`cargo-audit 0.23.0` inspected 239 locked packages against RustSec database commit
+`cargo-audit 0.23.0` running `cargo audit --deny warnings` inspected 243 locked
+packages against RustSec database commit
 `28d73fc95e5972af3403225a217def57dcaba3c4`, updated
-2026-11-10 14:45:03 +01:00 (1,446 advisories): **zero known vulnerabilities**,
-one informational unmaintained warning.
+2026-11-10 14:45:03 +01:00 (1,446 advisories): **zero known vulnerabilities and
+zero warnings**.
 
-[RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html)
-affects `unsafe-libyaml 0.2.11`, reached through `serde_yaml` and `rust-i18n`'s
-macro/support dependencies. The application compiles its tracked locale YAML
-into static lookup tables; no application runtime path parses user-supplied
-YAML. The build dependency remains relevant when reviewing locale changes.
-There is no patched release for this maintenance advisory. Replacing the
-localization stack is deferred to avoid an unrelated migration in this patch.
-Maintainers should review upstream alternatives by **2026-12-11**, or before
-the next release if earlier. No advisory suppression was added.
+To remediate F-05 ([RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html)
+on `unsafe-libyaml 0.2.11`), `Cargo.toml` sets `rust-i18n = "4.2.4"` and
+updates only the localization dependency subgraph (`239 -> 243` locked
+packages):
 
-The only dependency declaration added is Unix `libc`, already present in the
-lockfile; no dependency version or checksum changed.
+- **Removed (7 packages):** `unsafe-libyaml 0.2.11`,
+  `serde_yaml 0.9.34+deprecated`, `lazy_static 1.5.1`, `ryu 1.0.23`, and
+  `rust-i18n` / `rust-i18n-macro` / `rust-i18n-support` `3.1.5`.
+- **Updated/added (11 packages):** `rust-i18n 4.2.4`, `rust-i18n-macro 4.2.4`,
+  and `rust-i18n-support 4.2.4` (`MIT`), plus eight compile-time YAML/diagnostic
+  crates isolated behind `rust-i18n-macro`'s `codegen` feature (`serde-saphyr 1.3.0`,
+  `granit-parser 1.3.0`, `annotate-snippets 0.12.17`, `unicode-width 0.2.3`,
+  `arraydeque 0.5.1`, `base64 0.23.1`, `encoding_rs_io 0.1.8`, and
+  `nohash-hasher 0.2.0`, all `MIT` or `Apache-2.0` dual-licensed). None of the
+  eight added crates add `build.rs` scripts or enter the compiled target
+  binary's normal dependency graph, and `serde-saphyr` / `granit-parser` enforce
+  `#![forbid(unsafe_code)]`. `rust-i18n 4.2.4` retains the same local
+  `cargo:rerun-if-changed` `build.rs` watcher for `locales/**/*` as `3.1.5`.
+
+Aside from the targeted `rust-i18n` subgraph update, the only manifest
+dependency addition in `0.2.3` is Unix `libc` (already locked at `0.2.191`),
+with all other 232 locked packages unchanged. No advisory suppression was added.
 
 ## Verification and limits
 
