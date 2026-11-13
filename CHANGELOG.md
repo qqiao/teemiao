@@ -2,6 +2,31 @@
 
 All notable changes to `teemiao` are documented in this file.
 
+## [0.2.4] — Unreleased (Prepared)
+
+### Added
+
+- Accept `qoder-cli` alongside `qoder` and `qodercli` as case-insensitive identifiers for `teemiao agents update`, retaining the canonical `Qoder (qoder)` output label.
+
+### Fixed
+
+- Detect Qoder CLI when Commander.js soft-wraps its `--help` description, while continuing to reject conflicting product banners and usage names.
+- Resolve verified Qoder command dispatchers (`~/.qoder/entry/qoder` on Unix and `%USERPROFILE%\.qoder\entry\qoder.cmd` on Windows) to the underlying `qodercli` binary. Standalone updates run that binary directly; proven global npm installations retain their npm update path, while Homebrew, foreign managers, and ambiguous ownership require manual action.
+- Recognize `Successfully updated Qoder CLI from <old> to <new>.` as confirmation of an update when the initial version was unknown, preserving failure, negation, and post-update version checks.
+
+### Security
+
+- Inspect Qoder dispatchers statically with bounded reads, without executing shell or PowerShell code; reject oversized dispatchers and symlinked or invalid `.qodercli-install-resource` markers while preserving Windows batch-argument protections.
+- Exclude IDE-only dispatchers without an installed CLI, Qoder IDE bundles, and remote CLI launchers; keep unverified overrides and contradictory ownership evidence on the manual-action path.
+
+### Documentation
+
+- Align the [README](README.md), [CLI reference](docs/cli.md), [agent reference](docs/agents.md), and English/Simplified Chinese help with Qoder dispatcher behavior, all three identifiers, and version `0.2.4`.
+
+### Packaging
+
+- Prepare patch version `0.2.4` in `Cargo.toml` and the root `Cargo.lock` package entry without changing dependency versions. Publication and release tagging remain pending maintainer approval.
+
 ## [0.2.3] — Unreleased (Prepared)
 
 ### Fixed
