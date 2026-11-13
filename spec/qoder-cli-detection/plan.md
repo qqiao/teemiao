@@ -51,11 +51,11 @@ T001 (Reviewer spec/plan/tasks approval)
 - [x] `T001`: Reviewer (`Qian Qiao`) approves `spec.md`, `plan.md`, and `tasks.md` (`01a1d430-db07-70ed-a981-4c203afc2b29` on `b4fb6b3c6107d9f36ff1ee00c7b4e2006209bf9e`).
 
 ### Phase 2: Parallel core implementation and documentation (Wave 1)
-- [ ] `T002`: Fix Qoder CLI discovery, `.qoder/entry` dispatcher ownership resolution, `qoder-cli` alias, and update outcome matching (`src/agents/mod.rs`, `src/agents/discovery.rs`, `src/agents/update.rs`, `tests/agents_cli.rs`).
+- [x] `T002`: Fix Qoder CLI discovery, `.qoder/entry` dispatcher ownership resolution, `qoder-cli` alias, and update outcome matching (`src/agents/mod.rs`, `src/agents/discovery.rs`, `src/agents/update.rs`, `tests/agents_cli.rs`) — verified `d560b21` and merged in `782b75d`.
 - [x] `T003`: Update `en`/`zh-CN` CLI help catalogs and `docs/agents.md` for `qoder-cli` and `.qoder/entry` dispatcher behavior (`locales/en.yml`, `locales/zh-CN.yml`, `docs/agents.md`) — verified `d794c52` and merged in `390b68a`.
 
 ### Checkpoint: Wave 1 integration
-- [ ] Both `T002` and `T003` independently reviewed, verified with `doubt-driven-development`, and merged into `feat/qq-12-qoder-cli`; `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` pass.
+- [x] Both `T002` and `T003` independently reviewed, verified with `doubt-driven-development`, and merged into `feat/qq-12-qoder-cli`; `cargo test --locked` (55 unit + 35 integration tests) and `cargo clippy --locked --all-targets -- -D warnings` pass.
 
 ### Phase 3: Release preparation and PR delivery (Wave 2)
 - [ ] `T004`: Bump version to `0.2.4` in `Cargo.toml` and `Cargo.lock`, update `CHANGELOG.md`, `README.md`, `docs/cli.md`, and `tests/agents_cli.rs` version/help assertions, and validate `cargo package --list --locked` + `cargo publish --dry-run --locked`.

@@ -34,14 +34,14 @@
 **Description:** Using `test-driven-development`, `security-and-hardening`, and `performance-optimization`, fix Qoder CLI discovery for soft-wrapped multi-line `--help` preambles, implement safe static target resolution and ownership verification for Qoder's `.qoder/entry` command dispatchers (Unix & Windows) and `.qodercli-install-resource` markers, exclude IDE-only stubs (`"Qoder CLI is not installed"` / exit `127`) and `Qoder IDE.app` / Linux IDE / `remote-cli` paths, add the `qoder-cli` alias to `AgentId::Qoder`, and recognize `"Successfully updated Qoder CLI from <old> to <new>."` in `updater_output_confirms_updated`. Do **not** modify `locales/`, `docs/`, `README.md`, `Cargo.toml`, or the `"teemiao 0.2.3"` version assertion in `tests/agents_cli.rs` (owned by `T003`/`T004`).
 
 **Acceptance criteria:**
-- [ ] `teemiao agents list` and `teemiao agents update {qoder,qodercli,qoder-cli}` detect Qoder CLI `1.1.x` when `--version` prints bare `1.1.88` and `--help` wraps `"Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive\noutput."` across lines, while still rejecting `Acme Qoder CLI`, `Acme CLI`, `Qoder CLI\nAcme CLI`, and `index-tool`.
-- [ ] `.qoder/entry/qoder` (Unix) and `.qoder\entry\qoder.cmd` + `qoder-dispatcher.ps1` (Windows) resolve their underlying `qodercli` target in Qoder's exact order without executing shell/PowerShell code: standalone native targets yield `UpdateOwner::NativeSelfUpdate` invoking the verified `qodercli` binary (`qodercli update`); proven npm `@qoder-ai/qodercli` targets yield `UpdateOwner::NpmGlobal`; Homebrew (`.qodercli-install-resource` == `"homebrew-cask"` or Caskroom/Cellar), prerelease npm, foreign managers, and unverified `QODER_CLI_BIN` / wrapper targets yield `UpdateOwner::ManualActionRequired`; missing CLI targets / `"Qoder CLI is not installed"` (exit `127`) and `Qoder IDE.app` / `/usr/share/qoder-ide/` / `/remote-cli/` return `None` (absent).
-- [ ] `updater_output_confirms_updated` recognizes `"Successfully updated Qoder CLI from <old> to <new>."` when initial version was `None`, while preserving `"Unable to determine installation method."` and incomplete-output rejections.
+- [x] `teemiao agents list` and `teemiao agents update {qoder,qodercli,qoder-cli}` detect Qoder CLI `1.1.x` when `--version` prints bare `1.1.88` and `--help` wraps `"Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive\noutput."` across lines, while still rejecting `Acme Qoder CLI`, `Acme CLI`, `Qoder CLI\nAcme CLI`, and `index-tool`.
+- [x] `.qoder/entry/qoder` (Unix) and `.qoder\entry\qoder.cmd` + `qoder-dispatcher.ps1` (Windows) resolve their underlying `qodercli` target in Qoder's exact order without executing shell/PowerShell code: standalone native targets yield `UpdateOwner::NativeSelfUpdate` invoking the verified `qodercli` binary (`qodercli update`); proven npm `@qoder-ai/qodercli` targets yield `UpdateOwner::NpmGlobal`; Homebrew (`.qodercli-install-resource` == `"homebrew-cask"` or Caskroom/Cellar), prerelease npm, foreign managers, and unverified `QODER_CLI_BIN` / wrapper targets yield `UpdateOwner::ManualActionRequired`; missing CLI targets / `"Qoder CLI is not installed"` (exit `127`) and `Qoder IDE.app` / `/usr/share/qoder-ide/` / `/remote-cli/` return `None` (absent).
+- [x] `updater_output_confirms_updated` recognizes `"Successfully updated Qoder CLI from <old> to <new>."` when initial version was `None`, while preserving `"Unable to determine installation method."` and incomplete-output rejections.
 
 **Verification:**
-- [ ] Focused RED -> GREEN unit and integration tests pass: `cargo test --locked agents` and `cargo test --locked --test agents_cli`
-- [ ] Full suite, lint, and formatting pass: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && cargo build --locked`
-- [ ] Security and performance checks documented (bounded wrapper/marker file reads, zero extra subprocess probes when npm ownership is already proven, batch metacharacter validation preserved).
+- [x] Focused RED -> GREEN unit and integration tests pass: `cargo test --locked agents` and `cargo test --locked --test agents_cli` (verified on `d560b212621a84a159563bfcd66c73d46afe10f2` and merged at `782b75d67cb4bbe3f8649eee927a9cc6d720ce9c`)
+- [x] Full suite, lint, and formatting pass: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && cargo build --locked`
+- [x] Security and performance checks documented (bounded wrapper/marker file reads, zero extra subprocess probes when npm ownership is already proven, batch metacharacter validation preserved).
 
 **Dependencies:** `T001`
 
@@ -83,9 +83,9 @@
 ---
 
 ## Checkpoint: After Tasks T002–T003 (Wave 1 integration)
-- [ ] Leader independently reviews and verifies `T002` and `T003` commits with `code-review-and-quality` and `doubt-driven-development`
-- [ ] Both branches cleanly merged into `feat/qq-12-qoder-cli` and coder branches deleted
-- [ ] Combined `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` pass on `feat/qq-12-qoder-cli`
+- [x] Leader independently reviews and verifies `T002` and `T003` commits with `code-review-and-quality` and `doubt-driven-development`
+- [x] Both branches cleanly merged into `feat/qq-12-qoder-cli` and coder branches deleted
+- [x] Combined `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` pass on `feat/qq-12-qoder-cli`
 
 ---
 
