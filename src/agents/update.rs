@@ -1371,11 +1371,56 @@ fn updater_output_confirms_updated(
                 &ver_lower,
                 &predicates,
             )
+            || matches_updated_version_clause(&clause, agent_subject_aliases(agent_id), &ver_lower)
         {
             return true;
         }
     }
     false
+}
+
+fn matches_updated_version_clause(clause: &str, subjects: &[&str], ver_lower: &str) -> bool {
+    let Some(after_verb) = clause
+        .strip_prefix("successfully updated ")
+        .or_else(|| clause.strip_prefix("successfully upgraded "))
+        .or_else(|| clause.strip_prefix("updated "))
+        .or_else(|| clause.strip_prefix("upgraded "))
+    else {
+        return false;
+    };
+    let after_verb = after_verb.trim_start();
+    let target_v = format!("v{ver_lower}");
+    let is_target = |tok: &str| tok == ver_lower || tok == target_v;
+
+    let mut rest_candidates = Vec::new();
+    for subj in subjects {
+        if let Some(after_subj) = after_verb.strip_prefix(subj)
+            && let Some(rest) = after_subj.strip_prefix(' ')
+        {
+            rest_candidates.push(rest.trim_start());
+        }
+    }
+    if rest_candidates.is_empty()
+        && (after_verb.starts_with("from ") || after_verb.starts_with("to "))
+    {
+        rest_candidates.push(after_verb);
+    }
+
+    rest_candidates.into_iter().any(|rest| {
+        if let Some(from_rest) = rest.strip_prefix("from ") {
+            if let Some((old_raw, new_raw)) = from_rest.split_once(" to ") {
+                let old_tok = old_raw.trim();
+                let old_ver = old_tok.strip_prefix('v').unwrap_or(old_tok);
+                return super::discovery::is_valid_version_token(old_ver)
+                    && is_target(new_raw.trim());
+            }
+            false
+        } else if let Some(to_rest) = rest.strip_prefix("to ") {
+            is_target(to_rest.trim())
+        } else {
+            false
+        }
+    })
 }
 
 fn format_process_diagnostics(output: &ProcessOutput) -> Option<String> {
@@ -1456,6 +1501,7 @@ mod security_tests {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: false,
         };
         for (timed_out, stdout_truncated, stderr_truncated) in [
@@ -1499,5 +1545,56 @@ mod security_tests {
         content.pop();
         fs::write(&path, &content).unwrap();
         assert!(validate_downloaded_codex_installer(&path, false).is_ok());
+    }
+
+    #[test]
+    fn qoder_updater_output_confirms_from_old_to_new_update() {
+        let owner = UpdateOwner::NativeSelfUpdate {
+            program: std::path::PathBuf::from("/usr/local/bin/qodercli"),
+            args: vec!["update".to_string()],
+            display_command: "qodercli update".to_string(),
+        };
+        assert!(updater_output_confirms_updated(
+            "Checking for updates...\nSuccessfully updated Qoder CLI from 1.1.87 to 1.1.88.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(updater_output_confirms_updated(
+            "Successfully updated Qoder CLI to v1.1.88.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(!updater_output_confirms_updated(
+            "Successfully updated Qoder CLI from 1.1.87 to 1.1.89.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(!updater_output_confirms_updated(
+            "Successfully updated Codex CLI from 1.1.87 to 1.1.88.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(!updater_output_confirms_updated(
+            "Unable to determine installation method.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(!updater_output_confirms_updated(
+            "Successfully updated Qoder CLI from 1.1.87 to 1.1.88.\nUnable to determine installation method.",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
+        assert!(!updater_output_confirms_updated(
+            "Successfully updated Qoder CLI from 1.1.87 to 1.1.88...",
+            "1.1.88",
+            AgentId::Qoder,
+            &owner,
+        ));
     }
 }

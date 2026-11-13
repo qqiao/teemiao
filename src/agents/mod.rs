@@ -62,8 +62,8 @@ pub enum AgentId {
     #[value(name = "claude-code", alias = "claude")]
     ClaudeCode,
 
-    /// Qoder CLI (`qoder`, alias `qodercli`).
-    #[value(name = "qoder", alias = "qodercli")]
+    /// Qoder CLI (`qoder`, aliases `qodercli`, `qoder-cli`).
+    #[value(name = "qoder", aliases = ["qodercli", "qoder-cli"])]
     Qoder,
 }
 
@@ -136,9 +136,9 @@ impl FromStr for AgentId {
             "kimi" => Ok(AgentId::Kimi),
             "cursor" => Ok(AgentId::Cursor),
             "claude-code" | "claude" => Ok(AgentId::ClaudeCode),
-            "qoder" | "qodercli" => Ok(AgentId::Qoder),
+            "qoder" | "qodercli" | "qoder-cli" => Ok(AgentId::Qoder),
             other => Err(format!(
-                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude, or qoder/qodercli)"
+                "unknown agent '{other}' (expected codex, antigravity/agy, opencode, kimi, cursor, claude-code/claude, or qoder/qodercli/qoder-cli)"
             )),
         }
     }
@@ -1664,6 +1664,7 @@ mod tests {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: false,
         }
     }
@@ -1686,7 +1687,18 @@ mod tests {
         assert_eq!("QODER".parse::<AgentId>(), Ok(AgentId::Qoder));
         assert_eq!("qodercli".parse::<AgentId>(), Ok(AgentId::Qoder));
         assert_eq!("QoderCli".parse::<AgentId>(), Ok(AgentId::Qoder));
-        assert!("unknown-agent".parse::<AgentId>().is_err());
+        assert_eq!("qoder-cli".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!("QODER-CLI".parse::<AgentId>(), Ok(AgentId::Qoder));
+        assert_eq!(
+            <AgentId as clap::ValueEnum>::from_str("qoder-cli", true),
+            Ok(AgentId::Qoder)
+        );
+        assert_eq!(
+            <AgentId as clap::ValueEnum>::from_str("QODER-CLI", true),
+            Ok(AgentId::Qoder)
+        );
+        let err = "unknown-agent".parse::<AgentId>().unwrap_err();
+        assert!(err.contains("qoder/qodercli/qoder-cli"), "{err}");
     }
 
     #[test]
@@ -2586,6 +2598,7 @@ mod tests {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
 
@@ -2904,6 +2917,7 @@ mod tests {
             codex_home: Some(tmp.path().join(".codex")),
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
 
@@ -3512,6 +3526,7 @@ mod tests {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
         let runner =
@@ -4159,6 +4174,7 @@ fn main() -> ExitCode {
                 codex_home: None,
                 codex_install_dir: None,
                 homebrew_prefix: None,
+                qoder_cli_bin: None,
                 is_windows: true,
             };
             let cmd = AgentsCommand {
@@ -4727,6 +4743,7 @@ fn main() -> ExitCode {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
         let mut cache_win = PackageManagerCache::new();
@@ -4752,6 +4769,7 @@ fn main() -> ExitCode {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
         let runner_must_not_run = FakeProcessRunner::new(|_| unreachable!(), |_| unreachable!());
@@ -4995,6 +5013,7 @@ fn main() -> ExitCode {
             codex_home: None,
             codex_install_dir: None,
             homebrew_prefix: None,
+            qoder_cli_bin: None,
             is_windows: true,
         };
         for wrong_win_target in ["qoder", "qoder.exe"] {
@@ -5294,6 +5313,7 @@ fn main() -> ExitCode {
                 codex_home: None,
                 codex_install_dir: None,
                 homebrew_prefix: None,
+                qoder_cli_bin: None,
                 is_windows: true,
             };
             let runner_win_mgr = FakeProcessRunner::new(
@@ -5341,6 +5361,7 @@ fn main() -> ExitCode {
                 codex_home: None,
                 codex_install_dir: None,
                 homebrew_prefix: None,
+                qoder_cli_bin: None,
                 is_windows: true,
             };
             let mut cache_ww = PackageManagerCache::new();
@@ -5422,6 +5443,563 @@ fn main() -> ExitCode {
             matches!(qoder_bm.owner, UpdateOwner::NpmGlobal { .. }),
             "build-metadata-only version `0.9.0+20261110` should remain NpmGlobal, got {:?}",
             qoder_bm.owner
+        );
+    }
+
+    #[test]
+    fn qoder_wrapped_commander_help_preamble_accepts_and_rejects_conflicts() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        create_executable(&bin.join("qodercli"), "#!/bin/sh\necho '1.1.87'\n");
+        let env = test_env(&[&bin], &home);
+
+        for wrapped_help in [
+            "Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive\noutput.\n\nUsage: qodercli [options] [command]\n\nCommands:\n  update         Update Qoder CLI\n",
+            "Qoder CLI defaults to interactive mode and prints non-interactive\noutput when -p is passed.\n\nUsage: qodercli [options]\n\nCommands:\n  update         Check for updates\n",
+            "Qoder CLI\nA terminal coding assistant\nfor local repositories.\n\nUsage: qodercli [options]\n\nCommands:\n  update         Update Qoder CLI\n",
+        ] {
+            let runner = FakeProcessRunner::new(
+                move |req| {
+                    if req.args == ["--version"] {
+                        Ok(ok_output("1.1.87"))
+                    } else {
+                        Ok(ok_output(wrapped_help))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache = PackageManagerCache::new();
+            let discovered = discover_agent(AgentId::Qoder, &env, &runner, &mut cache)
+                .unwrap_or_else(|| {
+                    panic!("expected wrapped help to discover Qoder:\n{wrapped_help}")
+                });
+            assert_eq!(discovered.id, AgentId::Qoder);
+            assert!(
+                matches!(discovered.owner, UpdateOwner::NativeSelfUpdate { .. }),
+                "expected NativeSelfUpdate for wrapped help, got {:?}",
+                discovered.owner
+            );
+        }
+
+        for conflicting_help in [
+            "Acme Qoder CLI - Helper tool\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+            "Acme CLI\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+            "Qoder CLI\nAcme CLI\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+            "Qoder CLI - Powered by Acme\nCLI.\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+            "index-tool\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+            "Qoder CLI - Helper\n\nAcme CLI\n\nUsage: qodercli [options]\nCommands:\n  update  Update\n",
+        ] {
+            let runner = FakeProcessRunner::new(
+                move |req| {
+                    if req.args == ["--version"] {
+                        Ok(ok_output("1.1.87"))
+                    } else {
+                        Ok(ok_output(conflicting_help))
+                    }
+                },
+                |_| unreachable!(),
+            );
+            let mut cache = PackageManagerCache::new();
+            assert!(
+                discover_agent(AgentId::Qoder, &env, &runner, &mut cache).is_none(),
+                "expected conflicting help to be rejected:\n{conflicting_help}"
+            );
+        }
+    }
+
+    fn write_fake_unix_qoder_dispatcher(entry_dir: &std::path::Path) {
+        fs::create_dir_all(entry_dir).unwrap();
+        create_executable(
+            &entry_dir.join("qoder"),
+            concat!(
+                "#!/bin/sh\n",
+                "# Qoder CLI dispatcher\n",
+                "CLI_BIN=\"$(command -v qodercli 2>/dev/null || true)\"\n",
+                "if [ -z \"$CLI_BIN\" ] && [ -x \"$HOME/.local/bin/qodercli\" ]; then CLI_BIN=\"$HOME/.local/bin/qodercli\"; fi\n",
+                "if [ -z \"$CLI_BIN\" ] && [ -x \"$HOME/.qoder/bin/qodercli/qodercli\" ]; then CLI_BIN=\"$HOME/.qoder/bin/qodercli/qodercli\"; fi\n",
+                "if [ -z \"$CLI_BIN\" ]; then echo \"Qoder CLI is not installed.\" >&2; exit 127; fi\n",
+                "exec \"$CLI_BIN\" \"$@\"\n",
+            ),
+        );
+    }
+
+    fn write_fake_windows_qoder_dispatcher(entry_dir: &std::path::Path) {
+        fs::create_dir_all(entry_dir).unwrap();
+        create_executable(
+            &entry_dir.join("qoder.cmd"),
+            "@echo off\r\nsetlocal\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0qoder-dispatcher.ps1\" %*\r\n",
+        );
+        fs::write(
+            entry_dir.join("qoder-dispatcher.ps1"),
+            concat!(
+                "# Qoder CLI dispatcher\n",
+                "$cliBin = $env:QODER_CLI_BIN\n",
+                "if (-not $cliBin) { $cliBin = Join-Path $HOME '.qoder\\bin\\qodercli\\qodercli.exe' }\n",
+                "if (-not (Test-Path $cliBin)) { [Console]::Error.WriteLine('Qoder CLI is not installed.'); exit 127 }\n",
+                "& $cliBin @args\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn qoder_entry_dispatcher_unix_precedence_and_target_ownership() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let entry_dir = home.join(".qoder").join("entry");
+        write_fake_unix_qoder_dispatcher(&entry_dir);
+
+        // 1. Only `.qoder/entry` on PATH; underlying `.qoder/bin/qodercli/qodercli` with `curl-bash`
+        let qoder_bin_dir = home.join(".qoder").join("bin").join("qodercli");
+        fs::create_dir_all(&qoder_bin_dir).unwrap();
+        let qoder_bin = qoder_bin_dir.join("qodercli");
+        create_executable(&qoder_bin, "#!/bin/sh\necho '1.1.87'\n");
+        fs::write(
+            qoder_bin_dir.join(".qodercli-install-resource"),
+            "curl-bash\n",
+        )
+        .unwrap();
+
+        let env = test_env(&[&entry_dir], &home);
+        let entry_launcher = entry_dir.join("qoder");
+        let probed_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let probed_clone = Arc::clone(&probed_paths);
+        let runner = FakeProcessRunner::new(
+            move |req| {
+                probed_clone.lock().unwrap().push(req.program.clone());
+                if req.args == ["--version"] {
+                    Ok(ok_output("1.1.87"))
+                } else {
+                    Ok(ok_output(
+                        "Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive\noutput.\n\nUsage: qodercli [options] [command]\n\nCommands:\n  update         Update Qoder CLI\n",
+                    ))
+                }
+            },
+            |_| unreachable!(),
+        );
+        let mut cache = PackageManagerCache::new();
+        let discovered = discover_agent(AgentId::Qoder, &env, &runner, &mut cache).unwrap();
+        assert_eq!(discovered.launcher_path, entry_launcher);
+        assert_eq!(
+            discovered.resolved_path,
+            super::discovery::canonicalize_clean(&qoder_bin)
+        );
+        assert_eq!(discovered.version.as_deref(), Some("1.1.87"));
+        assert_eq!(
+            discovered.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: qoder_bin.clone(),
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+        assert!(
+            probed_paths.lock().unwrap().iter().all(|p| p == &qoder_bin),
+            "expected probes to invoke underlying qodercli binary directly, got {:?}",
+            *probed_paths.lock().unwrap()
+        );
+
+        // 2. `~/.local/bin/qodercli` takes precedence over `~/.qoder/bin/qodercli/qodercli`
+        let local_bin_dir = home.join(".local").join("bin");
+        fs::create_dir_all(&local_bin_dir).unwrap();
+        let local_qodercli = local_bin_dir.join("qodercli");
+        create_executable(&local_qodercli, "#!/bin/sh\necho '1.1.88'\n");
+        let mut cache2 = PackageManagerCache::new();
+        let discovered_local = discover_agent(AgentId::Qoder, &env, &runner, &mut cache2).unwrap();
+        assert_eq!(discovered_local.launcher_path, entry_launcher);
+        assert_eq!(
+            discovered_local.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: local_qodercli.clone(),
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+        fs::remove_file(&local_qodercli).unwrap();
+
+        // 3. `.qoder-cn/entry/qoder` resolves `<entry_root>/bin/qodercli/qodercli`
+        let cn_entry_dir = home.join(".qoder-cn").join("entry");
+        let cn_bin_dir = home.join(".qoder-cn").join("bin").join("qodercli");
+        write_fake_unix_qoder_dispatcher(&cn_entry_dir);
+        fs::create_dir_all(&cn_bin_dir).unwrap();
+        let cn_qodercli = cn_bin_dir.join("qodercli");
+        create_executable(&cn_qodercli, "#!/bin/sh\necho '1.1.87'\n");
+        let env_cn = test_env(&[&cn_entry_dir], &home);
+        let mut cache_cn = PackageManagerCache::new();
+        let discovered_cn =
+            discover_agent(AgentId::Qoder, &env_cn, &runner, &mut cache_cn).unwrap();
+        assert_eq!(discovered_cn.launcher_path, cn_entry_dir.join("qoder"));
+        assert_eq!(
+            discovered_cn.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: cn_qodercli,
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+
+        // 4. `.qodercli-install-resource` == "homebrew-cask" -> ManualActionRequired (`brew upgrade --cask qodercli`)
+        fs::write(
+            qoder_bin_dir.join(".qodercli-install-resource"),
+            "homebrew-cask\n",
+        )
+        .unwrap();
+        let mut cache_brew = PackageManagerCache::new();
+        let discovered_brew =
+            discover_agent(AgentId::Qoder, &env, &runner, &mut cache_brew).unwrap();
+        match &discovered_brew.owner {
+            UpdateOwner::ManualActionRequired { guidance, .. } => {
+                assert!(
+                    guidance.contains("brew upgrade --cask qodercli"),
+                    "{guidance}"
+                );
+            }
+            other => panic!("expected ManualActionRequired for homebrew-cask, got {other:?}"),
+        }
+
+        // 5. `.qodercli-install-resource` == "unknown-source" -> ManualActionRequired
+        fs::write(
+            qoder_bin_dir.join(".qodercli-install-resource"),
+            "unknown-source\n",
+        )
+        .unwrap();
+        let mut cache_unk = PackageManagerCache::new();
+        let discovered_unk = discover_agent(AgentId::Qoder, &env, &runner, &mut cache_unk).unwrap();
+        assert!(matches!(
+            discovered_unk.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 6. `.qodercli-install-resource` == "npm" without proven npm prefix -> ManualActionRequired
+        fs::write(qoder_bin_dir.join(".qodercli-install-resource"), "npm\n").unwrap();
+        let mut cache_unproven_npm = PackageManagerCache::new();
+        let discovered_unproven_npm =
+            discover_agent(AgentId::Qoder, &env, &runner, &mut cache_unproven_npm).unwrap();
+        assert!(matches!(
+            discovered_unproven_npm.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+        fs::remove_file(qoder_bin_dir.join(".qodercli-install-resource")).unwrap();
+
+        // 7. Proven global npm via `~/.local/bin/qodercli` -> skip `--help` probe
+        let npm_prefix = dir.path().join("npm-global");
+        let npm_bin = npm_prefix.join("bin");
+        let npm_pkg = npm_prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@qoder-ai")
+            .join("qodercli");
+        fs::create_dir_all(&npm_bin).unwrap();
+        fs::create_dir_all(npm_pkg.join("bin")).unwrap();
+        let npm_tool = npm_bin.join("npm");
+        create_executable(&npm_tool, "#!/bin/sh\n");
+        let pkg_entry = npm_pkg.join("bin").join("qodercli.js");
+        create_executable(&pkg_entry, "#!/usr/bin/env node\n");
+        fs::write(
+            npm_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.1.87","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&pkg_entry, &local_qodercli).unwrap();
+        let env_npm = test_env(&[&entry_dir, &npm_bin], &home);
+        let help_called = Arc::new(AtomicBool::new(false));
+        let help_flag = Arc::clone(&help_called);
+        let runner_npm = FakeProcessRunner::new(
+            move |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    help_flag.store(true, Ordering::SeqCst);
+                    unreachable!("--help must not run for proven npm target");
+                }
+                Ok(ok_output("1.1.87"))
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_npm = PackageManagerCache::new();
+        let discovered_npm =
+            discover_agent(AgentId::Qoder, &env_npm, &runner_npm, &mut cache_npm).unwrap();
+        assert!(!help_called.load(Ordering::SeqCst));
+        assert_eq!(discovered_npm.launcher_path, entry_launcher);
+        assert_eq!(
+            discovered_npm.owner,
+            UpdateOwner::NpmGlobal {
+                npm_program: npm_tool,
+                prefix: super::discovery::canonicalize_clean(&npm_prefix),
+                package: "@qoder-ai/qodercli".to_string(),
+            }
+        );
+
+        // 8. Prerelease npm version (`1.2.0-beta.1`) reached via `.qoder/entry/qoder` -> ManualActionRequired
+        fs::write(
+            npm_pkg.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","version":"1.2.0-beta.1","bin":{"qodercli":"bin/qodercli.js"}}"#,
+        )
+        .unwrap();
+        let runner_pre_npm = FakeProcessRunner::new(
+            |req| {
+                if req.args.iter().any(|a| a == "--help") {
+                    unreachable!("--help must not run for proven npm target");
+                }
+                Ok(ok_output("1.2.0-beta.1"))
+            },
+            |_| unreachable!(),
+        );
+        let mut cache_pre_npm = PackageManagerCache::new();
+        let discovered_pre_npm = discover_agent(
+            AgentId::Qoder,
+            &env_npm,
+            &runner_pre_npm,
+            &mut cache_pre_npm,
+        )
+        .unwrap();
+        assert!(matches!(
+            discovered_pre_npm.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 9. Foreign `.bun` symlink target at `~/.local/bin/qodercli` -> ManualActionRequired
+        let bun_bin = home.join(".bun").join("bin").join("qodercli");
+        fs::create_dir_all(bun_bin.parent().unwrap()).unwrap();
+        create_executable(&bun_bin, "#!/bin/sh\necho '1.1.87'\n");
+        let _ = fs::remove_file(&local_qodercli);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&bun_bin, &local_qodercli).unwrap();
+        let mut cache_bun = PackageManagerCache::new();
+        let discovered_bun = discover_agent(AgentId::Qoder, &env, &runner, &mut cache_bun).unwrap();
+        assert!(matches!(
+            discovered_bun.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+
+        // 10. Homebrew Caskroom symlink target at `~/.local/bin/qodercli` -> ManualActionRequired
+        let brew_cask_bin = dir
+            .path()
+            .join("homebrew")
+            .join("Caskroom")
+            .join("qodercli")
+            .join("1.1.87")
+            .join("qodercli");
+        fs::create_dir_all(brew_cask_bin.parent().unwrap()).unwrap();
+        create_executable(&brew_cask_bin, "#!/bin/sh\necho '1.1.87'\n");
+        let _ = fs::remove_file(&local_qodercli);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&brew_cask_bin, &local_qodercli).unwrap();
+        let mut cache_cask = PackageManagerCache::new();
+        let discovered_cask =
+            discover_agent(AgentId::Qoder, &env, &runner, &mut cache_cask).unwrap();
+        assert!(matches!(
+            discovered_cask.owner,
+            UpdateOwner::ManualActionRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn qoder_entry_dispatcher_windows_precedence_and_security() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let entry_dir = home.join(".qoder").join("entry");
+        write_fake_windows_qoder_dispatcher(&entry_dir);
+
+        let win_qoder_dir = home.join(".qoder").join("bin").join("qodercli");
+        fs::create_dir_all(&win_qoder_dir).unwrap();
+        let win_qoder_exe = win_qoder_dir.join("qodercli.exe");
+        create_executable(&win_qoder_exe, "#!/bin/sh\n");
+        fs::write(
+            win_qoder_dir.join(".qodercli-install-resource"),
+            "curl-bash\n",
+        )
+        .unwrap();
+
+        let path_bin_dir = dir.path().join("path-bin");
+        fs::create_dir_all(&path_bin_dir).unwrap();
+        let path_qoder_exe = path_bin_dir.join("qodercli.exe");
+        create_executable(&path_qoder_exe, "#!/bin/sh\n");
+
+        let override_dir = dir.path().join("override-verified");
+        fs::create_dir_all(&override_dir).unwrap();
+        let override_exe = override_dir.join("qodercli.exe");
+        create_executable(&override_exe, "#!/bin/sh\n");
+        fs::write(
+            override_dir.join(".qodercli-install-resource"),
+            "curl-bash\n",
+        )
+        .unwrap();
+
+        let runner = FakeProcessRunner::new(
+            |req| {
+                if req.args == ["--version"] {
+                    Ok(ok_output("1.1.87"))
+                } else {
+                    Ok(ok_output(
+                        "Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive\noutput.\n\nUsage: qodercli [options]\n\nCommands:\n  update  Update Qoder CLI\n",
+                    ))
+                }
+            },
+            |_| unreachable!(),
+        );
+
+        // 1. QODER_CLI_BIN overrides PATH qodercli.exe and HOME\.qoder\bin\qodercli\qodercli.exe
+        let env_override = DiscoveryEnv {
+            path: std::env::join_paths([&entry_dir, &path_bin_dir]).unwrap(),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: Some(home.join("AppData").join("Local")),
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            qoder_cli_bin: Some(override_exe.clone()),
+            is_windows: true,
+        };
+        let mut cache1 = PackageManagerCache::new();
+        let d1 = discover_agent(AgentId::Qoder, &env_override, &runner, &mut cache1).unwrap();
+        assert_eq!(d1.launcher_path, entry_dir.join("qoder.cmd"));
+        assert_eq!(
+            d1.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: override_exe.clone(),
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+
+        // 2. Unverified QODER_CLI_BIN override (no `.qodercli-install-resource`, non-standard dir) -> ManualActionRequired
+        fs::remove_file(override_dir.join(".qodercli-install-resource")).unwrap();
+        let mut cache2 = PackageManagerCache::new();
+        let d2 = discover_agent(AgentId::Qoder, &env_override, &runner, &mut cache2).unwrap();
+        assert!(matches!(d2.owner, UpdateOwner::ManualActionRequired { .. }));
+
+        // 3. No QODER_CLI_BIN and no PATH qodercli -> resolves HOME\.qoder\bin\qodercli\qodercli.exe
+        let env_win_home = DiscoveryEnv {
+            path: std::env::join_paths([&entry_dir]).unwrap(),
+            pathext: Some(OsString::from(".COM;.EXE;.BAT;.CMD")),
+            home_dir: Some(home.clone()),
+            local_app_data: Some(home.join("AppData").join("Local")),
+            codex_home: None,
+            codex_install_dir: None,
+            homebrew_prefix: None,
+            qoder_cli_bin: None,
+            is_windows: true,
+        };
+        let mut cache3 = PackageManagerCache::new();
+        let d3 = discover_agent(AgentId::Qoder, &env_win_home, &runner, &mut cache3).unwrap();
+        assert_eq!(d3.launcher_path, entry_dir.join("qoder.cmd"));
+        assert_eq!(
+            d3.owner,
+            UpdateOwner::NativeSelfUpdate {
+                program: win_qoder_exe,
+                args: vec!["update".to_string()],
+                display_command: "qodercli update".to_string(),
+            }
+        );
+
+        // 4. Oversized qoder-dispatcher.ps1 -> None (fails closed without spawning)
+        let mut oversized = String::from("# qoder_cli_bin qodercli\n");
+        oversized.push_str(&"#".repeat(70 * 1024));
+        fs::write(entry_dir.join("qoder-dispatcher.ps1"), oversized).unwrap();
+        let runner_never = FakeProcessRunner::new(|_| unreachable!(), |_| unreachable!());
+        let mut cache4 = PackageManagerCache::new();
+        assert!(
+            discover_agent(AgentId::Qoder, &env_win_home, &runner_never, &mut cache4).is_none()
+        );
+
+        // 5. Missing qoder-dispatcher.ps1 -> None
+        fs::remove_file(entry_dir.join("qoder-dispatcher.ps1")).unwrap();
+        let mut cache5 = PackageManagerCache::new();
+        assert!(
+            discover_agent(AgentId::Qoder, &env_win_home, &runner_never, &mut cache5).is_none()
+        );
+
+        // 6. Unsafe cmd.exe metacharacters in `.qoder\entry` path -> ManualActionRequired with 0 probes
+        let unsafe_entry = dir.path().join("foo&bar").join(".qoder").join("entry");
+        write_fake_windows_qoder_dispatcher(&unsafe_entry);
+        let env_unsafe = DiscoveryEnv {
+            path: std::env::join_paths([&unsafe_entry]).unwrap(),
+            ..env_win_home
+        };
+        let mut cache6 = PackageManagerCache::new();
+        let d6 = discover_agent(AgentId::Qoder, &env_unsafe, &runner_never, &mut cache6).unwrap();
+        assert!(matches!(d6.owner, UpdateOwner::ManualActionRequired { .. }));
+    }
+
+    #[test]
+    fn qoder_ide_bundle_remote_cli_and_not_installed_rejection() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+
+        // 1. Dispatcher present with NO underlying qodercli anywhere -> None (0 probes run)
+        let entry_dir = home.join(".qoder").join("entry");
+        write_fake_unix_qoder_dispatcher(&entry_dir);
+        let env_missing = test_env(&[&entry_dir], &home);
+        let runner_never = FakeProcessRunner::new(|_| unreachable!(), |_| unreachable!());
+        let mut cache1 = PackageManagerCache::new();
+        assert!(discover_agent(AgentId::Qoder, &env_missing, &runner_never, &mut cache1).is_none());
+
+        // 2. Direct `qoder` or `qodercli` emitting "Qoder CLI is not installed." (exit 127 or 0) -> None
+        let stub_bin = dir.path().join("stub-bin");
+        fs::create_dir_all(&stub_bin).unwrap();
+        create_executable(&stub_bin.join("qoder"), "#!/bin/sh\n");
+        let env_stub = test_env(&[&stub_bin], &home);
+        let runner_not_installed = FakeProcessRunner::new(
+            |_| {
+                Ok(ProcessOutput {
+                    success: false,
+                    status_code: Some(127),
+                    stdout: Vec::new(),
+                    stderr: b"Qoder CLI is not installed.\n".to_vec(),
+                    timed_out: false,
+                    interrupted: false,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                })
+            },
+            |_| unreachable!(),
+        );
+        let mut cache2 = PackageManagerCache::new();
+        assert!(
+            discover_agent(
+                AgentId::Qoder,
+                &env_stub,
+                &runner_not_installed,
+                &mut cache2
+            )
+            .is_none()
+        );
+
+        // 3. Reject `Qoder IDE.app`, `Qoder-IDE.app`, `/usr/share/qoder-ide/`, `/usr/share/qoder/`, and `/remote-cli/`
+        for subpath in [
+            "Qoder IDE.app/Contents/Resources/app/bin",
+            "Qoder-IDE.app/Contents/Resources/app/bin",
+            "usr/share/qoder-ide/bin",
+            "usr/share/qoder/bin",
+            ".qoder-server/bin/12345/bin/remote-cli",
+        ] {
+            let bundle_bin = dir.path().join(subpath);
+            fs::create_dir_all(&bundle_bin).unwrap();
+            create_executable(&bundle_bin.join("qodercli"), "#!/bin/sh\n");
+            let env_bundle = test_env(&[&bundle_bin], &home);
+            let mut cache_b = PackageManagerCache::new();
+            assert!(
+                discover_agent(AgentId::Qoder, &env_bundle, &runner_never, &mut cache_b).is_none(),
+                "expected IDE/remote-cli path `{subpath}` to be rejected before probing"
+            );
+        }
+
+        // 4. Oversized `.qoder/entry/qoder` dispatcher (>64 KiB) -> None
+        let oversized_entry = dir
+            .path()
+            .join("oversized-home")
+            .join(".qoder")
+            .join("entry");
+        fs::create_dir_all(&oversized_entry).unwrap();
+        let mut big = String::from("#!/bin/sh\n# Qoder CLI is not installed qodercli\n");
+        big.push_str(&"#".repeat(70 * 1024));
+        create_executable(&oversized_entry.join("qoder"), &big);
+        let env_over = test_env(&[&oversized_entry], &home);
+        let mut cache_over = PackageManagerCache::new();
+        assert!(
+            discover_agent(AgentId::Qoder, &env_over, &runner_never, &mut cache_over).is_none()
         );
     }
 }
