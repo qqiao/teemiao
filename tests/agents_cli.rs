@@ -287,14 +287,16 @@ fn agents_without_subcommand_displays_help_and_exits_2() {
     let ver_out = sb.run_teemiao(&["--version"], &[&sb.bin_dir], &[]);
     assert_eq!(ver_out.status.code(), Some(0));
     let ver_stdout = String::from_utf8_lossy(&ver_out.stdout);
-    assert_eq!(ver_stdout.trim(), "teemiao 0.2.3");
+    assert_eq!(ver_stdout.trim(), "teemiao 0.2.4");
 
     let update_help = sb.run_teemiao(&["agents", "update", "--help"], &[&sb.bin_dir], &[]);
     assert_eq!(update_help.status.code(), Some(0));
     let help_stdout = String::from_utf8_lossy(&update_help.stdout);
     assert!(
-        help_stdout.contains("qoder") && help_stdout.contains("qodercli"),
-        "expected qoder/qodercli in agents update --help: {help_stdout}"
+        help_stdout.contains("qoder")
+            && help_stdout.contains("qodercli")
+            && help_stdout.contains("qoder-cli"),
+        "expected qoder/qodercli/qoder-cli in agents update --help: {help_stdout}"
     );
 }
 
