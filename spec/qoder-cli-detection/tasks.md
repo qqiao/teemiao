@@ -96,12 +96,12 @@
 **Description:** Bump the root `teemiao` package version from `0.2.3` to `0.2.4` in `Cargo.toml` and `Cargo.lock` (preserving all dependency versions), add the `## [0.2.4] — Unreleased (Prepared)` section in `CHANGELOG.md`, align `README.md` (`qoder-cli` alias + `0.2.4` changelog reference) and `docs/cli.md` (`teemiao 0.2.4` output example), and update `tests/agents_cli.rs` to assert `teemiao 0.2.4` and `qoder-cli` in `agents update --help`.
 
 **Acceptance criteria:**
-- [ ] `Cargo.toml`, root `Cargo.lock` package entry, and `teemiao --version` all report `0.2.4`; `git diff Cargo.lock` modifies only the root `teemiao` version line.
-- [ ] `CHANGELOG.md`, `README.md`, and `docs/cli.md` accurately describe `0.2.4` and `qoder-cli` without altering historical `0.2.2`/`0.2.3` records.
-- [ ] `tests/agents_cli.rs` asserts `teemiao 0.2.4` on `--version` and `qoder-cli` visibility in `teemiao agents update --help`.
+- [x] `Cargo.toml`, root `Cargo.lock` package entry, and `teemiao --version` all report `0.2.4`; `git diff Cargo.lock` modifies only the root `teemiao` version line.
+- [x] `CHANGELOG.md`, `README.md`, and `docs/cli.md` accurately describe `0.2.4` and `qoder-cli` without altering historical `0.2.2`/`0.2.3` records.
+- [x] `tests/agents_cli.rs` asserts `teemiao 0.2.4` on `--version` and `qoder-cli` visibility in `teemiao agents update --help`.
 
 **Verification:**
-- [ ] Full spec verification suite passes on a clean committed tree:
+- [x] Full spec verification suite passes on a clean committed tree (verified on `1c420359c15014f6bded3bc2bd9f164e24436ad5` and merged at `87293edd29c0222bde572786542b4a0a2e155c8f`):
   `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && cargo build --locked && RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps && cargo metadata --locked --no-deps --format-version 1 && cargo run --locked -- --version && cargo run --locked -- agents update --help && cargo package --list --locked && cargo publish --dry-run --locked && git diff --check`
 
 **Dependencies:** `T002`, `T003` (Wave 1 checkpoint)
@@ -125,11 +125,11 @@
 **Description:** Review and verify `T004`, merge into `feat/qq-12-qoder-cli`, delete the coder branch, run `doubt-driven-development` end-to-end verification across the integrated feature on `feat/qq-12-qoder-cli`, push to `origin/feat/qq-12-qoder-cli`, and open one GitHub PR targeting `main` (`QQ-12: ...`).
 
 **Acceptance criteria:**
-- [ ] All acceptance criteria in `spec.md` and `CONSTRAINTS.md` verified independently on the final `feat/qq-12-qoder-cli` commit.
-- [ ] GitHub PR opened against `main` (without merging, tagging, or publishing) and reported on `QQ-12`; issue moved to `in_review`.
+- [x] All acceptance criteria in `spec.md` and `CONSTRAINTS.md` verified independently on the final `feat/qq-12-qoder-cli` commit.
+- [x] GitHub PR opened against `main` (without merging, tagging, or publishing) and reported on `QQ-12`; issue moved to `in_review`.
 
 **Verification:**
-- [ ] Complete `spec.md` command list + `cargo audit --deny warnings` (if installed) + `gh pr view` check.
+- [x] Complete `spec.md` command list + `cargo audit --deny warnings` (if installed) + `gh pr view` check.
 
 **Dependencies:** `T004`
 

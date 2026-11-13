@@ -58,8 +58,8 @@ T001 (Reviewer spec/plan/tasks approval)
 - [x] Both `T002` and `T003` independently reviewed, verified with `doubt-driven-development`, and merged into `feat/qq-12-qoder-cli`; `cargo test --locked` (55 unit + 35 integration tests) and `cargo clippy --locked --all-targets -- -D warnings` pass.
 
 ### Phase 3: Release preparation and PR delivery (Wave 2)
-- [ ] `T004`: Bump version to `0.2.4` in `Cargo.toml` and `Cargo.lock`, update `CHANGELOG.md`, `README.md`, `docs/cli.md`, and `tests/agents_cli.rs` version/help assertions, and validate `cargo package --list --locked` + `cargo publish --dry-run --locked`.
-- [ ] `T005`: Leader final `doubt-driven-development` verification on `feat/qq-12-qoder-cli` tip and GitHub PR creation (`QQ-12: ...`).
+- [x] `T004`: Bump version to `0.2.4` in `Cargo.toml` and `Cargo.lock`, update `CHANGELOG.md`, `README.md`, `docs/cli.md`, and `tests/agents_cli.rs` version/help assertions, and validate `cargo package --list --locked` + `cargo publish --dry-run --locked` — verified `1c42035` and merged in `87293ed`.
+- [x] `T005`: Leader final `doubt-driven-development` verification on `feat/qq-12-qoder-cli` tip and GitHub PR creation (`QQ-12: ...`).
 - [ ] `T006`: Human Reviewer final acceptance.
 
 ## Risks and mitigations
