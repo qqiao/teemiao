@@ -68,8 +68,8 @@ T001 (Reviewer spec/plan/tasks approval)
 - [x] `T005`: Leader final `doubt-driven-development` verification on `feat/qq-12-qoder-cli` tip and GitHub PR creation (`QQ-12: ...`, PR #29 at `eecb5cf`).
 
 ### Phase 4: PR #29 review feedback and conversation resolution (Wave 3)
-- [ ] `T007`: Address all five PR #29 Copilot review findings in `src/agents/discovery.rs` and `src/agents/mod.rs` (structural non-comment dispatcher verification for Unix/Windows upstream & fixture scripts, positive native-binary magic check for external `.qoder/entry` symlinks, `#[cfg(unix)]` gating on Unix-symlink subcases for Windows CI, `--help` exit `127` rejection, and validated `.qodercli-install-resource` recognition when `--version` prints bare `1.1.x` and `--help` is unavailable).
-- [ ] `T008`: Leader independent review, `doubt-driven-development` verification, merge of `T007` into `feat/qq-12-qoder-cli`, branch cleanup, push to PR #29, and reply/resolution for all five PR #29 review conversations.
+- [x] `T007`: Address all five PR #29 Copilot review findings in `src/agents/discovery.rs` and `src/agents/mod.rs` (structural non-comment dispatcher verification for Unix/Windows upstream & fixture scripts, positive native-binary magic check for external `.qoder/entry` symlinks, `#[cfg(unix)]` gating on Unix-symlink subcases for Windows CI, `--help` exit `127` rejection, and validated `.qodercli-install-resource` recognition when `--version` prints bare `1.1.x` and `--help` is unavailable) — verified `c340af4` and merged in `1b88fd4`.
+- [x] `T008`: Leader independent review, `doubt-driven-development` verification, merge of `T007` into `feat/qq-12-qoder-cli`, branch cleanup, push to PR #29, and reply/resolution for all five PR #29 review conversations.
 - [ ] `T006`: Human Reviewer final acceptance.
 
 ## Risks and mitigations

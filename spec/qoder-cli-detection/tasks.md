@@ -151,15 +151,15 @@
 5. **Honor validated `.qodercli-install-resource` when `--version` prints bare `1.1.x` and `--help` is unavailable (`src/agents/discovery.rs:1118–1131`, PR thread `PRRT_kwDOM79GKM63DK8I`):** Compute validated `detect_qoder_install_resource(&target_launcher_path, &target_resolved_path, &wrapper_targets, env.is_windows)` (`matches!(..., Ok(Some(_)))`) and accept it (when `!has_conflicting_non_qoder_product(&version_text)`) in `is_verified_cli` so real Qoder CLI installations returning bare `1.1.87` on `--version` are still recognized when `--help` times out, truncates, errors, or exits non-zero (non-127, non-conflicting), while preserving `help_negated_update`, conflicting-product/banner rejections, and `curl-bash` / `homebrew-cask` / `npm` / invalid-marker ownership boundaries.
 
 **Acceptance criteria:**
-- [ ] Spoofed `.qoder/entry/qoder`, `.qoder\entry\qoder.cmd`, and `qoder-dispatcher.ps1` files whose markers appear only in comments (`#`, `REM`, `::`) or `echo` lines are rejected (`None`, zero target probes), while both exact upstream `@qoder-ai/qodercli@1.1.88` templates (`J6s.sh`, `J6s.cmd` with `set "DISPATCHER=%~dp0qoder-dispatcher.ps1"` + `powershell.exe ... -File "%DISPATCHER%" -- %*`, BOM-prefixed `J6s.ps1` with `& $exe @argv`) and existing test fixtures pass verification.
-- [ ] A `.qoder/entry/qoder` symlink pointing outside `entry/` to an oversized (`>8 KiB`) `#!` script or invalid-UTF-8 script fails closed (`None`, zero probes), whereas a symlink to a compiled native binary (ELF/Mach-O/PE magic) falls through to `NotDispatcher` probing.
-- [ ] `qoder_entry_dispatcher_unix_precedence_and_target_ownership` and all new unit tests in `src/agents/mod.rs` compile with zero warnings and pass under both `cfg(unix)` and `cfg(windows)`.
-- [ ] A `--help` probe exiting `127` (even without `"not installed"` wording and even when `--version` succeeded or `curl-bash` marker is present) returns `None`.
-- [ ] When `--version` outputs bare `1.1.87` (exit `0`) and `--help` fails/times out (non-127, non-conflicting), candidates with a valid `.qodercli-install-resource` marker are discovered with the expected owner (`curl-bash` -> `NativeSelfUpdate`, `homebrew-cask` -> `ManualActionRequired`, `npm` without proven prefix -> `ManualActionRequired`, negated `--help` -> `ManualActionRequired`), while unbranded bare `1.1.87` candidates without a valid marker or `--help` evidence still return `None`.
+- [x] Spoofed `.qoder/entry/qoder`, `.qoder\entry\qoder.cmd`, and `qoder-dispatcher.ps1` files whose markers appear only in comments (`#`, `REM`, `::`) or `echo` lines are rejected (`None`, zero target probes), while both exact upstream `@qoder-ai/qodercli@1.1.88` templates (`J6s.sh`, `J6s.cmd` with `set "DISPATCHER=%~dp0qoder-dispatcher.ps1"` + `powershell.exe ... -File "%DISPATCHER%" -- %*`, BOM-prefixed `J6s.ps1` with `& $exe @argv`) and existing test fixtures pass verification.
+- [x] A `.qoder/entry/qoder` symlink pointing outside `entry/` to an oversized (`>8 KiB`) `#!` script or invalid-UTF-8 script fails closed (`None`, zero probes), whereas a symlink to a compiled native binary (ELF/Mach-O/PE magic) falls through to `NotDispatcher` probing.
+- [x] `qoder_entry_dispatcher_unix_precedence_and_target_ownership` and all new unit tests in `src/agents/mod.rs` compile with zero warnings and pass under both `cfg(unix)` and `cfg(windows)`.
+- [x] A `--help` probe exiting `127` (even without `"not installed"` wording and even when `--version` succeeded or `curl-bash` marker is present) returns `None`.
+- [x] When `--version` outputs bare `1.1.87` (exit `0`) and `--help` fails/times out (non-127, non-conflicting), candidates with a valid `.qodercli-install-resource` marker are discovered with the expected owner (`curl-bash` -> `NativeSelfUpdate`, `homebrew-cask` -> `ManualActionRequired`, `npm` without proven prefix -> `ManualActionRequired`, negated `--help` -> `ManualActionRequired`), while unbranded bare `1.1.87` candidates without a valid marker or `--help` evidence still return `None`.
 
 **Verification:**
-- [ ] Focused RED -> GREEN unit and CLI tests pass: `cargo test --locked agents` and `cargo test --locked --test agents_cli`
-- [ ] Full spec verification suite passes with zero warnings:
+- [x] Focused RED -> GREEN unit and CLI tests pass: `cargo test --locked agents` and `cargo test --locked --test agents_cli` (verified on `c340af4e15513782f441c8f48f1b0b4f8d2c1861` and merged at `1b88fd4394ca2396dbc0298c7455f4ed2952e04e`)
+- [x] Full spec verification suite passes with zero warnings:
   `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && cargo build --locked && RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps && cargo metadata --locked --no-deps --format-version 1 && cargo package --list --locked && cargo publish --dry-run --locked && git diff --check`
 
 **Dependencies:** `T005`
@@ -180,9 +180,9 @@
 **Description:** Independently review and verify `T007` (`code-review-and-quality` + `doubt-driven-development`), merge into `feat/qq-12-qoder-cli`, conditionally delete the `T007` coder branch, push `origin/feat/qq-12-qoder-cli` to update PR #29, post concise technical replies referencing the fixing commit SHA on each of the five PR #29 review comments, resolve all five PR #29 review threads via GitHub GraphQL, update `QQ-12` tracking, and return `QQ-12` to `in_review`.
 
 **Acceptance criteria:**
-- [ ] `T007` verified independently (including full 11-command `spec.md` suite and `cargo audit --deny warnings`), merged into `feat/qq-12-qoder-cli`, and coder branch cleaned up locally and on `origin`.
-- [ ] All 5 Copilot review threads on PR #29 (`PRRT_kwDOM79GKM63DK7C`, `PRRT_kwDOM79GKM63DK7P`, `PRRT_kwDOM79GKM63DK7h`, `PRRT_kwDOM79GKM63DK7y`, `PRRT_kwDOM79GKM63DK8I`) replied to and marked `isResolved: true`.
-- [ ] Updated head pushed to `origin/feat/qq-12-qoder-cli`, `QQ-12` moved to `in_review`, and Reviewer notified within 5 short lines.
+- [x] `T007` verified independently (including full 11-command `spec.md` suite and `cargo audit --deny warnings`), merged into `feat/qq-12-qoder-cli`, and coder branch cleaned up locally and on `origin`.
+- [x] All 5 Copilot review threads on PR #29 (`PRRT_kwDOM79GKM63DK7C`, `PRRT_kwDOM79GKM63DK7P`, `PRRT_kwDOM79GKM63DK7h`, `PRRT_kwDOM79GKM63DK7y`, `PRRT_kwDOM79GKM63DK8I`) replied to and marked `isResolved: true`.
+- [x] Updated head pushed to `origin/feat/qq-12-qoder-cli`, `QQ-12` moved to `in_review`, and Reviewer notified within 5 short lines.
 
 **Dependencies:** `T007`
 
