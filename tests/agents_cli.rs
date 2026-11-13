@@ -3799,5 +3799,60 @@ fn qoder_entry_dispatcher_wrapped_commander_alias_and_updater_cli() {
         );
     }
 
+    // 6. `.qodercli-install-resource == "curl-bash"` with unavailable `--help` and initial
+    //    `version: None` authorizes `qodercli update` and confirms `unknown -> 1.1.88`.
+    let sb_cb_err = TestSandbox::new();
+    let entry_cb_err = sb_cb_err.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_cb_err.join("qoder"), dispatcher_script);
+    let bin_cb_err = sb_cb_err.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_cb_err).unwrap();
+    sb_cb_err.install_fake_tool_in(
+        &bin_cb_err,
+        "qodercli",
+        &[("version_exit", "2"), ("help_exit", "2")],
+    );
+    fs::write(bin_cb_err.join(".qodercli-install-resource"), "curl-bash\n").unwrap();
+    let cb_list = sb_cb_err.run_teemiao(&["agents", "list"], &[&entry_cb_err], &[]);
+    assert_eq!(cb_list.status.code(), Some(0));
+    let cb_list_stdout = String::from_utf8_lossy(&cb_list.stdout);
+    assert!(
+        cb_list_stdout.contains("Qoder (qoder) | version: unknown")
+            && cb_list_stdout.contains("update: native (qodercli update)"),
+        "expected curl-bash with failed probes to report NativeSelfUpdate: {cb_list_stdout}"
+    );
+    let cb_dry = sb_cb_err.run_teemiao(
+        &["agents", "update", "qoder-cli", "--dry-run"],
+        &[&entry_cb_err],
+        &[],
+    );
+    assert_eq!(cb_dry.status.code(), Some(0));
+
+    let sb_cb_up = TestSandbox::new();
+    let entry_cb_up = sb_cb_up.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_cb_up.join("qoder"), dispatcher_script);
+    let bin_cb_up = sb_cb_up.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_cb_up).unwrap();
+    sb_cb_up.install_fake_tool_in(
+        &bin_cb_up,
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI"),
+            ("help_exit", "2"),
+            (
+                "update_stdout",
+                "Successfully updated Qoder CLI from 1.1.87 to 1.1.88.",
+            ),
+            ("next_version_stdout", "Qoder CLI 1.1.88"),
+        ],
+    );
+    fs::write(bin_cb_up.join(".qodercli-install-resource"), "curl-bash\n").unwrap();
+    let cb_up = sb_cb_up.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_cb_up], &[]);
+    assert_eq!(cb_up.status.code(), Some(0));
+    let cb_up_stdout = String::from_utf8_lossy(&cb_up.stdout);
+    assert!(
+        cb_up_stdout.contains("updated") && cb_up_stdout.contains("unknown -> 1.1.88"),
+        "expected curl-bash unknown -> 1.1.88 update output: {cb_up_stdout}"
+    );
+
     let _ = qoder_bin;
 }
