@@ -20,6 +20,7 @@ use rust_i18n::t;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -682,17 +683,186 @@ fn path_is_qoder_entry_location(path: &Path, is_windows: bool) -> bool {
     name_matches && qoder_entry_root(path).is_some()
 }
 
-fn has_qoder_dispatcher_marker(lower: &str) -> bool {
-    lower.contains("qoder cli is not installed")
-        || lower.contains("qodercli is not installed")
-        || lower.contains("qoder-dispatcher")
-        || lower.contains("qoder_cli_bin")
-        || lower.contains("qoder_config_dir")
-        || lower.contains(".qoder/bin/qodercli")
-        || lower.contains(".qoder-cn/bin/qodercli")
-        || lower.contains(".local/bin/qodercli")
-        || (lower.contains("serve-web") && lower.contains("tunnel"))
-        || lower.contains("command -v qodercli")
+fn first_posix_command_word(stmt: &str) -> &str {
+    let mut rest = stmt.trim_start();
+    loop {
+        let Some(token) = rest.split_whitespace().next() else {
+            return "";
+        };
+        let is_plain_env_assign = token.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && !token.contains("$(")
+                && !token.contains('`')
+        });
+        if is_plain_env_assign && rest.len() > token.len() {
+            rest = rest[token.len()..].trim_start();
+            continue;
+        }
+        return token;
+    }
+}
+
+fn normalize_posix_statement(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    let mut rest = collapsed.as_str();
+    while let Some(stripped) = ["if ", "then ", "elif ", "else ", "do ", "! ", "{ "]
+        .iter()
+        .find_map(|prefix| rest.strip_prefix(prefix))
+    {
+        rest = stripped.trim_start();
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    if matches!(first_posix_command_word(rest), "echo" | "printf") {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+fn extract_posix_executable_statements(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start_matches('\u{feff}');
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escape = false;
+    let mut paren_depth: usize = 0;
+    let mut prev_ws_or_sep = true;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if escape {
+            escape = false;
+            if (!in_double || ch != '\n') && !in_single {
+                current.push(ch);
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+        if in_single {
+            // Single quotes suppress command/variable expansion in POSIX sh.
+            if ch == '\'' {
+                in_single = false;
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+        if in_double {
+            match ch {
+                '\\' => {
+                    escape = true;
+                    current.push(ch);
+                }
+                '"' => {
+                    in_double = false;
+                    current.push(ch);
+                }
+                _ => current.push(ch),
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escape = true;
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '\'' => {
+                in_single = true;
+                prev_ws_or_sep = false;
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '#' if prev_ws_or_sep => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                if i < chars.len() && paren_depth == 0 {
+                    if let Some(stmt) = normalize_posix_statement(&current) {
+                        statements.push(stmt);
+                    }
+                    current.clear();
+                } else {
+                    current.push(' ');
+                }
+                prev_ws_or_sep = true;
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+                prev_ws_or_sep = true;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '\n' | ';' if paren_depth == 0 => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+            }
+            '&' if paren_depth == 0 && i + 1 < chars.len() && chars[i + 1] == '&' => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+                i += 1;
+            }
+            '|' if paren_depth == 0 && i + 1 < chars.len() && chars[i + 1] == '|' => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+                i += 1;
+            }
+            c if c.is_ascii_whitespace() => {
+                current.push(' ');
+                prev_ws_or_sep = true;
+            }
+            _ => {
+                current.push(ch);
+                prev_ws_or_sep = matches!(ch, ';' | '(' | '&' | '|');
+            }
+        }
+        i += 1;
+    }
+
+    if let Some(stmt) = normalize_posix_statement(&current) {
+        statements.push(stmt);
+    }
+    statements
+}
+
+fn unix_statement_has_var_exec(stmt: &str) -> bool {
+    let Some(after_exec) = stmt.strip_prefix("exec ") else {
+        return false;
+    };
+    let Some(var_pos) = after_exec.find("\"$") else {
+        return false;
+    };
+    after_exec[var_pos + 2..].contains("\"$@\"")
 }
 
 fn verify_unix_qoder_dispatcher(script_path: &Path) -> bool {
@@ -705,8 +875,314 @@ fn verify_unix_qoder_dispatcher(script_path: &Path) -> bool {
     if extract_verified_wrapper_exec_target(script_path).is_some() {
         return false;
     }
-    let lower = content.to_ascii_lowercase().replace('\\', "/");
-    lower.contains("qodercli") && has_qoder_dispatcher_marker(&lower)
+    let statements = extract_posix_executable_statements(&content);
+    let has_lookup = statements.iter().any(|stmt| {
+        stmt.contains("command -v qodercli")
+            || stmt.contains("type -p qodercli")
+            || stmt.contains("/.local/bin/qodercli")
+            || stmt.contains("/.qoder/bin/qodercli")
+            || stmt.contains("/.qoder-cn/bin/qodercli")
+    });
+    let has_var_exec = statements
+        .iter()
+        .any(|stmt| unix_statement_has_var_exec(stmt));
+    has_lookup && has_var_exec
+}
+
+fn split_cmd_line_segments(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b'&' if !in_quotes => {
+                let prev = i.checked_sub(1).map(|idx| bytes[idx]);
+                if !matches!(prev, Some(b'>' | b'<')) {
+                    segments.push(&line[start..i]);
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+                        i += 1;
+                    }
+                    start = i + 1;
+                }
+            }
+            b'|' if !in_quotes && i + 1 < bytes.len() && bytes[i + 1] == b'|' => {
+                segments.push(&line[start..i]);
+                i += 1;
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    segments.push(&line[start..]);
+    segments
+}
+
+fn batch_keyword_matches(stmt: &str, keyword: &str) -> bool {
+    stmt == keyword
+        || stmt.strip_prefix(keyword).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_whitespace() || matches!(c, '.' | '/' | ':' | '('))
+        })
+}
+
+fn tokenize_cmd_segment(stmt: &str) -> Vec<(String, bool)> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = stmt.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        if chars[i] == '"' {
+            i += 1;
+            let mut tok = String::new();
+            while i < chars.len() && chars[i] != '"' {
+                tok.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() {
+                i += 1;
+            }
+            tokens.push((tok.to_ascii_lowercase().replace('\\', "/"), true));
+        } else {
+            let mut tok = String::new();
+            while i < chars.len() && !chars[i].is_ascii_whitespace() {
+                tok.push(chars[i]);
+                i += 1;
+            }
+            tokens.push((tok.to_ascii_lowercase().replace('\\', "/"), false));
+        }
+    }
+    tokens
+}
+
+fn verify_windows_cmd_dispatcher(cmd_text: &str) -> bool {
+    let trimmed = cmd_text.trim_start_matches('\u{feff}');
+    let mut dispatcher_vars: Vec<String> = Vec::new();
+
+    for raw_line in trimmed.lines() {
+        let trimmed_line = raw_line.trim();
+        if trimmed_line.is_empty() || trimmed_line.starts_with("::") {
+            continue;
+        }
+        for raw_seg in split_cmd_line_segments(trimmed_line) {
+            let seg = raw_seg.trim().trim_start_matches('@').trim_start();
+            if seg.is_empty() {
+                continue;
+            }
+            let seg_lower = seg.to_ascii_lowercase().replace('\\', "/");
+            if seg_lower.starts_with("::") || batch_keyword_matches(&seg_lower, "rem") {
+                break;
+            }
+            if batch_keyword_matches(&seg_lower, "echo") {
+                continue;
+            }
+            if let Some(rest) = seg_lower
+                .strip_prefix("set ")
+                .or_else(|| seg_lower.strip_prefix("set\t"))
+            {
+                let assign = rest.trim().trim_matches('"');
+                if let Some((var, val)) = assign.split_once('=') {
+                    let var_name = var.trim();
+                    let val_norm = val.trim().trim_matches('"');
+                    if !var_name.is_empty()
+                        && matches!(
+                            val_norm,
+                            "%~dp0qoder-dispatcher.ps1" | "%~dp0/qoder-dispatcher.ps1"
+                        )
+                    {
+                        dispatcher_vars.push(format!("%{var_name}%"));
+                    }
+                }
+                continue;
+            }
+
+            let tokens = tokenize_cmd_segment(seg);
+            let mut idx = 0;
+            if tokens
+                .get(idx)
+                .is_some_and(|(tok, quoted)| !quoted && tok == "call")
+            {
+                idx += 1;
+            }
+            let Some((exe_tok, _)) = tokens.get(idx) else {
+                continue;
+            };
+            let exe_name = exe_tok.rsplit('/').next().unwrap_or(exe_tok.as_str());
+            if !matches!(
+                exe_name,
+                "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+            ) {
+                continue;
+            }
+            let args = &tokens[idx + 1..];
+            let Some(file_flag_idx) = args
+                .iter()
+                .position(|(tok, quoted)| !quoted && tok == "-file")
+            else {
+                continue;
+            };
+            let Some((target_arg, _)) = args.get(file_flag_idx + 1) else {
+                continue;
+            };
+            let targets_dispatcher = matches!(
+                target_arg.as_str(),
+                "%~dp0qoder-dispatcher.ps1" | "%~dp0/qoder-dispatcher.ps1"
+            ) || dispatcher_vars.iter().any(|var| var == target_arg);
+            if targets_dispatcher && args[file_flag_idx + 2..].iter().any(|(tok, _)| tok == "%*") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn normalize_powershell_statement(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let first_word = collapsed.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first_word,
+        "write-host"
+            | "write-output"
+            | "write-debug"
+            | "write-verbose"
+            | "write-warning"
+            | "write-information"
+            | "echo"
+    ) {
+        return None;
+    }
+    Some(collapsed)
+}
+
+fn extract_powershell_executable_statements(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start_matches('\u{feff}');
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_block_comment = false;
+    let mut backtick = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_block_comment {
+            if ch == '#' && i + 1 < chars.len() && chars[i + 1] == '>' {
+                in_block_comment = false;
+                current.push(' ');
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_single {
+            current.push(ch);
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    current.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            current.push(ch);
+            if backtick {
+                backtick = false;
+            } else if ch == '`' {
+                backtick = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if ch == '<' && i + 1 < chars.len() && chars[i + 1] == '#' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if ch == '#' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            if let Some(stmt) = normalize_powershell_statement(&current) {
+                statements.push(stmt);
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+            }
+            '\n' | '\r' | ';' | '{' | '}' => {
+                if let Some(stmt) = normalize_powershell_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+        i += 1;
+    }
+
+    if let Some(stmt) = normalize_powershell_statement(&current) {
+        statements.push(stmt);
+    }
+    statements
+}
+
+fn verify_windows_ps1_dispatcher(ps_text: &str) -> bool {
+    let statements = extract_powershell_executable_statements(ps_text);
+    let has_lookup = statements.iter().any(|stmt| {
+        stmt.contains("$env:qoder_cli_bin")
+            || stmt.contains("$env:qodercn_cli_bin")
+            || stmt.contains("get-command qodercli")
+            || stmt.contains("get-command \"qodercli\"")
+            || stmt.contains("get-command 'qodercli'")
+            || stmt.contains(".qoder/bin/qodercli/qodercli.exe")
+            || stmt.contains(".qoder-cn/bin/qodercli/qodercli.exe")
+    });
+    let has_var_call = statements.iter().any(|stmt| {
+        let starts_with_var_call = stmt.starts_with("& $") || stmt.starts_with("& \"$");
+        starts_with_var_call
+            && stmt
+                .split_whitespace()
+                .any(|tok| matches!(tok, "@args" | "@argv" | "$args"))
+    });
+    has_lookup && has_var_call
 }
 
 fn verify_windows_qoder_dispatcher(cmd_path: &Path) -> bool {
@@ -720,8 +1196,7 @@ fn verify_windows_qoder_dispatcher(cmd_path: &Path) -> bool {
     let Some(cmd_text) = read_qoder_dispatcher_text(cmd_path) else {
         return false;
     };
-    let cmd_lower = cmd_text.to_ascii_lowercase().replace('\\', "/");
-    if !cmd_lower.contains("qoder-dispatcher.ps1") {
+    if !verify_windows_cmd_dispatcher(&cmd_text) {
         return false;
     }
     let Some(entry_dir) = cmd_path.parent() else {
@@ -735,8 +1210,39 @@ fn verify_windows_qoder_dispatcher(cmd_path: &Path) -> bool {
     let Some(ps_text) = read_qoder_dispatcher_text(&ps1_path) else {
         return false;
     };
-    let ps_lower = ps_text.to_ascii_lowercase().replace('\\', "/");
-    ps_lower.contains("qodercli") && has_qoder_dispatcher_marker(&ps_lower)
+    verify_windows_ps1_dispatcher(&ps_text)
+}
+
+fn is_compiled_native_binary(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::with_capacity(4);
+    if file.take(4).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    if buf.len() >= 2 && &buf[..2] == b"MZ" {
+        return true;
+    }
+    buf.len() == 4
+        && matches!(
+            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            0x7F45_4C46 // ELF
+                | 0xFEED_FACE // Mach-O 32-bit BE
+                | 0xCEFA_EDFE // Mach-O 32-bit LE
+                | 0xFEED_FACF // Mach-O 64-bit BE
+                | 0xCFFA_EDFE // Mach-O 64-bit LE
+                | 0xCAFE_BABE // Mach-O Universal BE
+                | 0xBEBA_FECA // Mach-O Universal LE
+                | 0xCAFE_BABF // Mach-O Universal64 BE
+                | 0xBFBA_FECA // Mach-O Universal64 LE
+        )
 }
 
 fn classify_qoder_entry_dispatcher(
@@ -774,9 +1280,9 @@ fn classify_qoder_entry_dispatcher(
     // dispatcher verification, fail closed so oversized or unverified scripts are never executed.
     if !resolved_in_entry
         && launcher_path != resolved_path
-        && read_qoder_dispatcher_text(resolved_path).is_none()
+        && is_compiled_native_binary(resolved_path)
     {
-        // Direct symlink outside `entry/` pointing to a compiled binary (e.g. Mach-O/ELF).
+        // Direct symlink outside `entry/` pointing to a compiled binary (e.g. Mach-O/ELF/PE).
         return QoderEntryStatus::NotDispatcher;
     }
     QoderEntryStatus::Invalid
@@ -1092,34 +1598,46 @@ fn verify_qoder_target_candidate(
                 && !version_out.stderr_truncated
                 && version_out.status_code.is_some()
                 && let Ok(help_out) = run_bounded_probe(&target_launcher_path, &["--help"], runner)
-                && !help_out.timed_out
-                && !help_out.stdout_truncated
-                && !help_out.stderr_truncated
             {
-                let combined_help = format!(
-                    "{}\n{}",
-                    String::from_utf8_lossy(&help_out.stdout),
-                    String::from_utf8_lossy(&help_out.stderr)
-                );
-                if has_qoder_desktop_or_ide_signature(&combined_help)
-                    || has_qoder_cli_not_installed_signature(&combined_help)
-                    || help_has_conflicting_usage_program(&combined_help)
-                    || help_has_conflicting_product_banner(&combined_help)
-                {
+                if help_out.status_code == Some(127) {
                     return None;
                 }
-                if help_out.success {
-                    help_text = Some(combined_help);
-                } else if help_output_negates_update(&combined_help) {
-                    help_negated_update = true;
+                if !help_out.timed_out && !help_out.stdout_truncated && !help_out.stderr_truncated {
+                    let combined_help = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&help_out.stdout),
+                        String::from_utf8_lossy(&help_out.stderr)
+                    );
+                    if has_qoder_desktop_or_ide_signature(&combined_help)
+                        || has_qoder_cli_not_installed_signature(&combined_help)
+                        || help_has_conflicting_usage_program(&combined_help)
+                        || help_has_conflicting_product_banner(&combined_help)
+                    {
+                        return None;
+                    }
+                    if help_out.success {
+                        help_text = Some(combined_help);
+                    } else if help_output_negates_update(&combined_help) {
+                        help_negated_update = true;
+                    }
                 }
             }
+
+            let install_resource = detect_qoder_install_resource(
+                &target_launcher_path,
+                &target_resolved_path,
+                &wrapper_targets,
+                env.is_windows,
+            );
+            let has_verified_install_resource = matches!(install_resource, Ok(Some(_)))
+                && !has_conflicting_non_qoder_product(&version_text);
 
             let is_verified_cli = npm_signal.is_some()
                 || version_has_qoder_cli_branding(&version_text)
                 || help_text
                     .as_deref()
                     .is_some_and(help_has_qoder_cli_evidence)
+                || has_verified_install_resource
                 || (is_dedicated_cli_name
                     && (!version_out.success
                         || version_text.to_ascii_lowercase().contains("qoder")));
@@ -1139,6 +1657,7 @@ fn verify_qoder_target_candidate(
                     wrapper_targets: &wrapper_targets,
                     version: version.as_deref(),
                     npm_signal,
+                    install_resource: Some(install_resource),
                     has_native_update_cmd,
                     help_checked,
                     origin: &origin,
@@ -1182,6 +1701,7 @@ fn verify_qoder_target_candidate(
                     wrapper_targets: &wrapper_targets,
                     version: None,
                     npm_signal,
+                    install_resource: None,
                     has_native_update_cmd: false,
                     help_checked: false,
                     origin: &origin,
@@ -2248,6 +2768,7 @@ struct QoderOwnerInput<'a> {
     wrapper_targets: &'a [(PathBuf, PathBuf)],
     version: Option<&'a str>,
     npm_signal: Option<ManagerSignal>,
+    install_resource: Option<Result<Option<QoderInstallResource>, String>>,
     has_native_update_cmd: bool,
     help_checked: bool,
     origin: &'a QoderTargetOrigin,
@@ -2263,16 +2784,20 @@ fn determine_qoder_owner_with_origin(
         wrapper_targets,
         version,
         npm_signal,
+        install_resource,
         has_native_update_cmd,
         help_checked,
         origin,
     } = input;
-    let install_resource = match detect_qoder_install_resource(
-        launcher_path,
-        resolved_path,
-        wrapper_targets,
-        env.is_windows,
-    ) {
+    let install_resource_res = install_resource.unwrap_or_else(|| {
+        detect_qoder_install_resource(
+            launcher_path,
+            resolved_path,
+            wrapper_targets,
+            env.is_windows,
+        )
+    });
+    let install_resource = match install_resource_res {
         Ok(res) => res,
         Err(reason) => {
             return UpdateOwner::ManualActionRequired {
@@ -2694,6 +3219,7 @@ fn inspect_candidate(
                         "@qoder-ai/qodercli",
                         env.is_windows,
                     ),
+                    install_resource: None,
                     has_native_update_cmd: false,
                     help_checked: false,
                     origin: &QoderTargetOrigin::default(),
