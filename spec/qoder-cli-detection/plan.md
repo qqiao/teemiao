@@ -41,6 +41,12 @@ T001 (Reviewer spec/plan/tasks approval)
          ▼ (Checkpoint 2: Full suite + packaging checks)
        T005 (Leader doubt-driven final verification & GitHub PR to main)
          │
+         ▼ (PR #29 review feedback requested by Qian Qiao)
+       T007 (Address PR #29 Copilot review findings & Windows test gating)         [Coder]
+         │
+         ▼
+       T008 (Leader independent verification, merge, push & PR thread resolution)
+         │
          ▼
        T006 (Human acceptance on QQ-12)
 ```
@@ -59,7 +65,11 @@ T001 (Reviewer spec/plan/tasks approval)
 
 ### Phase 3: Release preparation and PR delivery (Wave 2)
 - [x] `T004`: Bump version to `0.2.4` in `Cargo.toml` and `Cargo.lock`, update `CHANGELOG.md`, `README.md`, `docs/cli.md`, and `tests/agents_cli.rs` version/help assertions, and validate `cargo package --list --locked` + `cargo publish --dry-run --locked` — verified `1c42035` and merged in `87293ed`.
-- [x] `T005`: Leader final `doubt-driven-development` verification on `feat/qq-12-qoder-cli` tip and GitHub PR creation (`QQ-12: ...`).
+- [x] `T005`: Leader final `doubt-driven-development` verification on `feat/qq-12-qoder-cli` tip and GitHub PR creation (`QQ-12: ...`, PR #29 at `eecb5cf`).
+
+### Phase 4: PR #29 review feedback and conversation resolution (Wave 3)
+- [ ] `T007`: Address all five PR #29 Copilot review findings in `src/agents/discovery.rs` and `src/agents/mod.rs` (structural non-comment dispatcher verification for Unix/Windows upstream & fixture scripts, positive native-binary magic check for external `.qoder/entry` symlinks, `#[cfg(unix)]` gating on Unix-symlink subcases for Windows CI, `--help` exit `127` rejection, and validated `.qodercli-install-resource` recognition when `--version` prints bare `1.1.x` and `--help` is unavailable).
+- [ ] `T008`: Leader independent review, `doubt-driven-development` verification, merge of `T007` into `feat/qq-12-qoder-cli`, branch cleanup, push to PR #29, and reply/resolution for all five PR #29 review conversations.
 - [ ] `T006`: Human Reviewer final acceptance.
 
 ## Risks and mitigations
