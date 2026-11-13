@@ -3491,3 +3491,368 @@ fn cli_localization_parity_help_messages_precedence_and_fallback() {
     );
     assert_eq!(String::from_utf8(list_fr.stdout).unwrap(), list_en_out);
 }
+
+#[cfg(unix)]
+fn write_executable_dispatcher(path: &std::path::Path, content: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, content).unwrap();
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn qoder_entry_dispatcher_wrapped_commander_alias_and_updater_cli() {
+    let dispatcher_script = concat!(
+        "#!/bin/sh\n",
+        "# Qoder CLI dispatcher\n",
+        "CLI_BIN=\"$(command -v qodercli 2>/dev/null || true)\"\n",
+        "if [ -z \"$CLI_BIN\" ] && [ -x \"$HOME/.local/bin/qodercli\" ]; then CLI_BIN=\"$HOME/.local/bin/qodercli\"; fi\n",
+        "if [ -z \"$CLI_BIN\" ] && [ -x \"$HOME/.qoder/bin/qodercli/qodercli\" ]; then CLI_BIN=\"$HOME/.qoder/bin/qodercli/qodercli\"; fi\n",
+        "if [ -z \"$CLI_BIN\" ]; then echo \"Qoder CLI is not installed.\" >&2; exit 127; fi\n",
+        "exec \"$CLI_BIN\" \"$@\"\n",
+    );
+
+    // 1. Qian Qiao's exact PATH setup: only `~/.qoder/entry` on PATH, wrapped Commander `--help`,
+    //    standalone `~/.qoder/bin/qodercli/qodercli` (`curl-bash`), `qoder-cli` alias, and
+    //    `"Successfully updated Qoder CLI from ... to ..."` updater confirmation.
+    let sb = TestSandbox::new();
+    let entry_dir = sb.home.join(".qoder").join("entry");
+    let entry_qoder = entry_dir.join("qoder");
+    write_executable_dispatcher(&entry_qoder, dispatcher_script);
+
+    let qoder_bin_dir = sb.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&qoder_bin_dir).unwrap();
+    let (qoder_bin, _) = sb.install_fake_tool_in(
+        &qoder_bin_dir,
+        "qodercli",
+        &[
+            ("version_stdout", "1.1.87"),
+            (
+                "help_stdout",
+                "Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive<NL>output.<NL><NL>Usage: qodercli [options] [command]<NL><NL>Commands:<NL>  update         Update Qoder CLI",
+            ),
+            (
+                "update_stdout",
+                "Successfully updated Qoder CLI from 1.1.87 to 1.1.88.",
+            ),
+            ("next_version_stdout", "1.1.88"),
+        ],
+    );
+    fs::write(
+        qoder_bin_dir.join(".qodercli-install-resource"),
+        "curl-bash\n",
+    )
+    .unwrap();
+
+    let list_out = sb.run_teemiao(&["agents", "list"], &[&entry_dir], &[]);
+    assert_eq!(list_out.status.code(), Some(0));
+    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        list_stdout.contains("Qoder (qoder) | version: 1.1.87")
+            && list_stdout.contains(&format!("path: {}", entry_qoder.display()))
+            && list_stdout.contains("update: native (qodercli update)"),
+        "unexpected list output: {list_stdout}"
+    );
+
+    let dry_out = sb.run_teemiao(
+        &["agents", "update", "QoDeR-ClI", "--dry-run"],
+        &[&entry_dir],
+        &[],
+    );
+    assert_eq!(dry_out.status.code(), Some(0));
+    let dry_stdout = String::from_utf8_lossy(&dry_out.stdout);
+    assert!(
+        dry_stdout.contains("dry-run") && dry_stdout.contains("qodercli update"),
+        "unexpected dry-run output: {dry_stdout}"
+    );
+    assert!(
+        !sb.invocations()
+            .iter()
+            .any(|line| line.contains("|ARGS=update|")),
+        "dry-run must not execute qodercli update: {:?}",
+        sb.invocations()
+    );
+
+    let upd_out = sb.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_dir], &[]);
+    assert_eq!(
+        upd_out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&upd_out.stdout),
+        String::from_utf8_lossy(&upd_out.stderr)
+    );
+    let upd_stdout = String::from_utf8_lossy(&upd_out.stdout);
+    assert!(
+        upd_stdout.contains("updated") && upd_stdout.contains("1.1.87 -> 1.1.88"),
+        "unexpected update output: {upd_stdout}"
+    );
+    assert!(
+        sb.invocations()
+            .iter()
+            .any(|line| line.starts_with("TOOL=qodercli|ARGS=update|")),
+        "expected verified qodercli binary to execute directly: {:?}",
+        sb.invocations()
+    );
+
+    // 2. Initial unknown version (`None`) + `"Successfully updated Qoder CLI from ... to ..."` vs
+    //    `"Unable to determine installation method."`.
+    let sb_unk = TestSandbox::new();
+    let entry_unk = sb_unk.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_unk.join("qoder"), dispatcher_script);
+    let bin_unk = sb_unk.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_unk).unwrap();
+    sb_unk.install_fake_tool_in(
+        &bin_unk,
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI"),
+            (
+                "help_stdout",
+                "Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive<NL>output.<NL><NL>Commands:<NL>  update         Update Qoder CLI",
+            ),
+            (
+                "update_stdout",
+                "Successfully updated Qoder CLI from 1.1.87 to 1.1.88.",
+            ),
+            ("next_version_stdout", "1.1.88"),
+        ],
+    );
+    let upd_unk_ok = sb_unk.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_unk], &[]);
+    assert_eq!(upd_unk_ok.status.code(), Some(0));
+    let stdout_unk_ok = String::from_utf8_lossy(&upd_unk_ok.stdout);
+    assert!(
+        stdout_unk_ok.contains("updated") && stdout_unk_ok.contains("unknown -> 1.1.88"),
+        "unexpected unknown->1.1.88 output: {stdout_unk_ok}"
+    );
+
+    let sb_unable = TestSandbox::new();
+    let entry_unable = sb_unable.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_unable.join("qoder"), dispatcher_script);
+    let bin_unable = sb_unable.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_unable).unwrap();
+    sb_unable.install_fake_tool_in(
+        &bin_unable,
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI"),
+            (
+                "help_stdout",
+                "Qoder CLI - Defaults to interactive mode.<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+            ("update_stdout", "Unable to determine installation method."),
+            ("next_version_stdout", "1.1.88"),
+        ],
+    );
+    let upd_unable =
+        sb_unable.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_unable], &[]);
+    assert_eq!(upd_unable.status.code(), Some(1));
+
+    // 3. Precedence (`~/.local/bin/qodercli` beats `~/.qoder/bin/qodercli/qodercli`) &
+    //    Homebrew `.qodercli-install-resource == "homebrew-cask"` -> manual action required.
+    let local_bin_dir = sb.home.join(".local").join("bin");
+    fs::create_dir_all(&local_bin_dir).unwrap();
+    sb.install_fake_tool_in(
+        &local_bin_dir,
+        "qodercli",
+        &[
+            ("version_stdout", "2.0.0"),
+            (
+                "help_stdout",
+                "Qoder CLI - Defaults to interactive mode.<NL>Commands:<NL>  update  Update Qoder CLI",
+            ),
+        ],
+    );
+    let list_local = sb.run_teemiao(&["agents", "list"], &[&entry_dir], &[]);
+    let list_local_stdout = String::from_utf8_lossy(&list_local.stdout);
+    assert!(
+        list_local_stdout.contains("version: 2.0.0")
+            && list_local_stdout.contains(&format!("path: {}", entry_qoder.display())),
+        "expected ~/.local/bin/qodercli precedence: {list_local_stdout}"
+    );
+
+    fs::write(
+        local_bin_dir.join(".qodercli-install-resource"),
+        "homebrew-cask\n",
+    )
+    .unwrap();
+    let cask_upd = sb.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_dir], &[]);
+    assert_eq!(cask_upd.status.code(), Some(1));
+    let cask_stdout = String::from_utf8_lossy(&cask_upd.stdout);
+    assert!(
+        cask_stdout.contains("manual action required")
+            && cask_stdout.contains("brew upgrade --cask qodercli"),
+        "expected Homebrew cask manual action: {cask_stdout}"
+    );
+    let _ = fs::remove_file(local_bin_dir.join(".qodercli-install-resource"));
+    let _ = fs::remove_file(local_bin_dir.join("qodercli"));
+
+    // 4. Global npm `@qoder-ai/qodercli` target via `.qoder/entry/qoder` -> `~/.local/bin/qodercli`
+    //    must route to NpmGlobal without running `--help`.
+    let sb_npm = TestSandbox::new();
+    let entry_npm = sb_npm.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_npm.join("qoder"), dispatcher_script);
+    let npm_prefix = sb_npm.root.join("npm-global");
+    let npm_bin = npm_prefix.join("bin");
+    let npm_pkg = npm_prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@qoder-ai")
+        .join("qodercli");
+    let npm_pkg_bin = npm_pkg.join("bin");
+    fs::create_dir_all(&npm_bin).unwrap();
+    fs::create_dir_all(&npm_pkg_bin).unwrap();
+    sb_npm.install_fake_tool_in(&npm_bin, "npm", &[("update_stdout", "added 1 package")]);
+    let (pkg_cli, _) =
+        sb_npm.install_fake_tool_in(&npm_pkg_bin, "qodercli", &[("version_stdout", "1.1.87")]);
+    fs::write(
+        npm_pkg.join("package.json"),
+        r#"{"name":"@qoder-ai/qodercli","version":"1.1.87","bin":{"qodercli":"bin/qodercli"}}"#,
+    )
+    .unwrap();
+    let npm_local_bin = sb_npm.home.join(".local").join("bin");
+    fs::create_dir_all(&npm_local_bin).unwrap();
+    std::os::unix::fs::symlink(&pkg_cli, npm_local_bin.join("qodercli")).unwrap();
+    let list_npm = sb_npm.run_teemiao(&["agents", "list"], &[&entry_npm, &npm_bin], &[]);
+    assert_eq!(list_npm.status.code(), Some(0));
+    let list_npm_stdout = String::from_utf8_lossy(&list_npm.stdout);
+    assert!(
+        list_npm_stdout.contains("update: npm (@qoder-ai/qodercli in "),
+        "expected npm ownership via dispatcher: {list_npm_stdout}"
+    );
+    assert!(
+        !sb_npm
+            .invocations()
+            .iter()
+            .any(|line| line.contains("|ARGS=--help|")),
+        "npm ownership should not invoke --help: {:?}",
+        sb_npm.invocations()
+    );
+
+    // 5. IDE-only stub (no qodercli installed), `Qoder IDE.app`, `/usr/share/qoder-ide/`,
+    //    `/remote-cli/`, and conflicting banners must not discover Qoder.
+    let sb_missing = TestSandbox::new();
+    let entry_missing = sb_missing.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_missing.join("qoder"), dispatcher_script);
+    let list_missing = sb_missing.run_teemiao(&["agents", "list"], &[&entry_missing], &[]);
+    assert_eq!(list_missing.status.code(), Some(0));
+    let missing_stdout = String::from_utf8_lossy(&list_missing.stdout);
+    assert!(
+        !missing_stdout.contains("Qoder (qoder)"),
+        "missing CLI target must not discover Qoder: {missing_stdout}"
+    );
+
+    for subpath in [
+        "Qoder IDE.app/Contents/Resources/app/bin",
+        "usr/share/qoder-ide/bin",
+        ".qoder-server/bin/abc/bin/remote-cli",
+    ] {
+        let sb_ide = TestSandbox::new();
+        let ide_bin = sb_ide.root.join(subpath);
+        fs::create_dir_all(&ide_bin).unwrap();
+        sb_ide.install_fake_tool_in(
+            &ide_bin,
+            "qodercli",
+            &[
+                ("version_stdout", "1.1.87"),
+                (
+                    "help_stdout",
+                    "Qoder CLI<NL>Commands:<NL>  update  Update Qoder CLI",
+                ),
+            ],
+        );
+        let ide_list = sb_ide.run_teemiao(&["agents", "list"], &[&ide_bin], &[]);
+        assert_eq!(ide_list.status.code(), Some(0));
+        assert!(
+            !String::from_utf8_lossy(&ide_list.stdout).contains("Qoder (qoder)"),
+            "IDE/remote-cli path `{subpath}` must be excluded"
+        );
+        assert!(
+            sb_ide.invocations().is_empty(),
+            "IDE/remote-cli path `{subpath}` must be excluded before spawning: {:?}",
+            sb_ide.invocations()
+        );
+    }
+
+    for conflicting_help in [
+        "Acme Qoder CLI<NL>Commands:<NL>  update  Update",
+        "Qoder CLI<NL>Acme CLI<NL>Commands:<NL>  update  Update",
+        "index-tool<NL>Commands:<NL>  update  Update",
+    ] {
+        let sb_conf = TestSandbox::new();
+        sb_conf.install_fake_tool(
+            "qodercli",
+            &[
+                ("version_stdout", "1.1.87"),
+                ("help_stdout", conflicting_help),
+            ],
+        );
+        let conf_list = sb_conf.run_teemiao(&["agents", "list"], &[&sb_conf.bin_dir], &[]);
+        assert_eq!(conf_list.status.code(), Some(0));
+        assert!(
+            !String::from_utf8_lossy(&conf_list.stdout).contains("Qoder (qoder)"),
+            "conflicting help `{conflicting_help}` must not discover Qoder"
+        );
+    }
+
+    // 6. `.qodercli-install-resource == "curl-bash"` with unavailable `--help` and initial
+    //    `version: None` authorizes `qodercli update` and confirms `unknown -> 1.1.88`.
+    let sb_cb_err = TestSandbox::new();
+    let entry_cb_err = sb_cb_err.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_cb_err.join("qoder"), dispatcher_script);
+    let bin_cb_err = sb_cb_err.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_cb_err).unwrap();
+    sb_cb_err.install_fake_tool_in(
+        &bin_cb_err,
+        "qodercli",
+        &[("version_exit", "2"), ("help_exit", "2")],
+    );
+    fs::write(bin_cb_err.join(".qodercli-install-resource"), "curl-bash\n").unwrap();
+    let cb_list = sb_cb_err.run_teemiao(&["agents", "list"], &[&entry_cb_err], &[]);
+    assert_eq!(cb_list.status.code(), Some(0));
+    let cb_list_stdout = String::from_utf8_lossy(&cb_list.stdout);
+    assert!(
+        cb_list_stdout.contains("Qoder (qoder) | version: unknown")
+            && cb_list_stdout.contains("update: native (qodercli update)"),
+        "expected curl-bash with failed probes to report NativeSelfUpdate: {cb_list_stdout}"
+    );
+    let cb_dry = sb_cb_err.run_teemiao(
+        &["agents", "update", "qoder-cli", "--dry-run"],
+        &[&entry_cb_err],
+        &[],
+    );
+    assert_eq!(cb_dry.status.code(), Some(0));
+
+    let sb_cb_up = TestSandbox::new();
+    let entry_cb_up = sb_cb_up.home.join(".qoder").join("entry");
+    write_executable_dispatcher(&entry_cb_up.join("qoder"), dispatcher_script);
+    let bin_cb_up = sb_cb_up.home.join(".qoder").join("bin").join("qodercli");
+    fs::create_dir_all(&bin_cb_up).unwrap();
+    sb_cb_up.install_fake_tool_in(
+        &bin_cb_up,
+        "qodercli",
+        &[
+            ("version_stdout", "Qoder CLI"),
+            ("help_exit", "2"),
+            (
+                "update_stdout",
+                "Successfully updated Qoder CLI from 1.1.87 to 1.1.88.",
+            ),
+            ("next_version_stdout", "Qoder CLI 1.1.88"),
+        ],
+    );
+    fs::write(bin_cb_up.join(".qodercli-install-resource"), "curl-bash\n").unwrap();
+    let cb_up = sb_cb_up.run_teemiao(&["agents", "update", "qoder-cli"], &[&entry_cb_up], &[]);
+    assert_eq!(cb_up.status.code(), Some(0));
+    let cb_up_stdout = String::from_utf8_lossy(&cb_up.stdout);
+    assert!(
+        cb_up_stdout.contains("updated") && cb_up_stdout.contains("unknown -> 1.1.88"),
+        "expected curl-bash unknown -> 1.1.88 update output: {cb_up_stdout}"
+    );
+
+    let _ = qoder_bin;
+}
