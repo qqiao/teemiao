@@ -63,13 +63,13 @@
 **Description:** Update English and Simplified Chinese CLI help strings (`locales/en.yml` and `locales/zh-CN.yml`) and `docs/agents.md` to document the `qoder-cli` alias alongside `qoder`/`qodercli`, Qoder's `.qoder/entry` command-dispatcher discovery and underlying `qodercli` ownership resolution, `.qodercli-install-resource` / Homebrew / npm / standalone boundaries, and IDE-only stub exclusion. Do **not** touch `src/`, `tests/`, `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, or `docs/cli.md`.
 
 **Acceptance criteria:**
-- [ ] `locales/en.yml` and `locales/zh-CN.yml` list `qoder`/`qodercli`/`qoder-cli` consistently in `agents.update.agent.help` and `agents.update.agent.long_help` while maintaining full localization parity.
-- [ ] `docs/agents.md` accurately documents `qoder-cli` alias support, `.qoder/entry/qoder` (and Windows `.qoder\entry\qoder.cmd`) dispatcher resolution, direct underlying `qodercli update` execution for standalone installs, manual-action boundaries, and troubleshooting when only Qoder IDE's dispatcher stub is present.
-- [ ] All relative Markdown links and anchors in `docs/agents.md` remain valid.
+- [x] `locales/en.yml` and `locales/zh-CN.yml` list `qoder`/`qodercli`/`qoder-cli` consistently in `agents.update.agent.help` and `agents.update.agent.long_help` while maintaining full localization parity.
+- [x] `docs/agents.md` accurately documents `qoder-cli` alias support, `.qoder/entry/qoder` (and Windows `.qoder\entry\qoder.cmd`) dispatcher resolution, direct underlying `qodercli update` execution for standalone installs, manual-action boundaries, and troubleshooting when only Qoder IDE's dispatcher stub is present.
+- [x] All relative Markdown links and anchors in `docs/agents.md` remain valid.
 
 **Verification:**
-- [ ] Tests pass (including `src/main.rs` localization parity tests and `tests/agents_cli.rs`): `cargo test --locked`
-- [ ] Build, lint, docs, and formatting pass: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps && git diff --check`
+- [x] Tests pass (including `src/main.rs` localization parity tests and `tests/agents_cli.rs`): `cargo test --locked` (verified on `d794c52702a88ab36dcb425c88a71c21d2e0178a` and merged at `390b68a4c5cfdee1c3471f261f67011a5b799a4f`)
+- [x] Build, lint, docs, and formatting pass: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps && git diff --check`
 
 **Dependencies:** `T001`
 

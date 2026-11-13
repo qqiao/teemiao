@@ -52,7 +52,7 @@ T001 (Reviewer spec/plan/tasks approval)
 
 ### Phase 2: Parallel core implementation and documentation (Wave 1)
 - [ ] `T002`: Fix Qoder CLI discovery, `.qoder/entry` dispatcher ownership resolution, `qoder-cli` alias, and update outcome matching (`src/agents/mod.rs`, `src/agents/discovery.rs`, `src/agents/update.rs`, `tests/agents_cli.rs`).
-- [ ] `T003`: Update `en`/`zh-CN` CLI help catalogs and `docs/agents.md` for `qoder-cli` and `.qoder/entry` dispatcher behavior (`locales/en.yml`, `locales/zh-CN.yml`, `docs/agents.md`).
+- [x] `T003`: Update `en`/`zh-CN` CLI help catalogs and `docs/agents.md` for `qoder-cli` and `.qoder/entry` dispatcher behavior (`locales/en.yml`, `locales/zh-CN.yml`, `docs/agents.md`) — verified `d794c52` and merged in `390b68a`.
 
 ### Checkpoint: Wave 1 integration
 - [ ] Both `T002` and `T003` independently reviewed, verified with `doubt-driven-development`, and merged into `feat/qq-12-qoder-cli`; `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` pass.
