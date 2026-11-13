@@ -31,7 +31,7 @@ In Simplified Chinese (`zh-CN`):
 teemiao agents update [AGENT] [--dry-run]
 ```
 
-- **`[AGENT]` (optional, case-insensitive):** Canonical agent ID or alias (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`).
+- **`[AGENT]` (optional, case-insensitive):** Canonical agent ID or alias (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`/`qoder-cli`).
   - When specified, only that agent is discovered and processed.
   - When omitted, Teemiao discovers all installed supported agents on `PATH` and processes them sequentially in catalog order.
 - **`--dry-run`:** Runs discovery and read-only ownership checks, then prints the planned update command and target (or `manual action required` guidance) without executing updaters, downloading installers, or modifying installed files.
@@ -48,13 +48,13 @@ Agents are always listed and updated in this deterministic catalog order:
 | 4 | Kimi | `kimi` | — | `kimi` | Native self-update (`<launcher> upgrade --yes`, displayed as `kimi upgrade --yes`) |
 | 5 | Cursor | `cursor` | — | `agent` (requires Cursor CLI identity proof), `cursor-agent` | Native self-update (`<launcher> update`, displayed as `agent update` or `cursor-agent update`) |
 | 6 | Claude Code | `claude-code` | `claude` | `claude` | Native self-update (`<launcher> update`, displayed as `claude update`), global npm (`<npm> install -g --prefix <prefix> @anthropic-ai/claude-code@latest`), Homebrew cask (`<brew> upgrade --cask <cask-token>`), or WinGet (`<winget> upgrade --exact --id Anthropic.ClaudeCode --accept-source-agreements --accept-package-agreements --disable-interactivity`) |
-| 7 | Qoder | `qoder` | `qodercli` | `qodercli`, `qoder` (requires Qoder CLI identity proof) | Global npm (`<npm> install -g --prefix <prefix> @qoder-ai/qodercli@latest`) or native self-update (`<launcher> update`, displayed as `qodercli update` or `qoder update`, when `--help` advertises `update`) |
+| 7 | Qoder | `qoder` | `qodercli`, `qoder-cli` | `qodercli`, `qoder` (requires Qoder CLI identity proof; a verified Qoder command dispatcher such as `~/.qoder/entry/qoder` is resolved to its underlying `qodercli`) | Global npm (`<npm> install -g --prefix <prefix> @qoder-ai/qodercli@latest`) or native self-update (`<launcher> update`, displayed as `qodercli update` or `qoder update`; for a dispatcher, the resolved `qodercli` binary runs `update` directly) |
 
 ## Ownership Resolution and Channel Preservation Rules
 
 Teemiao never guesses a package-manager owner from the mere presence of `npm`, `brew`, or `winget` on `PATH`:
 
-- **Package-managed and multi-method agents (`codex`, `claude-code`, `qoder`):** Package-managed update plans (`npm`, `Homebrew`, `WinGet`), Codex standalone installer plans, Claude Code native updates, and Qoder native updates require positive proof from the active launcher path, its symlink-resolved target, verified wrapper script bindings, local package metadata, or `--help` output.
+- **Package-managed and multi-method agents (`codex`, `claude-code`, `qoder`):** Package-managed update plans (`npm`, `Homebrew`, `WinGet`), Codex standalone installer plans, Claude Code native updates, and Qoder native updates require positive proof from the active launcher path, its symlink-resolved target, verified wrapper script bindings, the underlying `qodercli` resolved from a verified Qoder command dispatcher, local package metadata or install markers, or `--help` output.
 - **Dedicated native self-updating CLIs (`antigravity`/`agy`, `opencode`, `kimi`, and identity-verified `cursor`):** Select their native self-update subcommand using agent-specific foreign/system-manager checks and reject unsafe Windows `.cmd` shims. Antigravity and Cursor reject npm (`node_modules`) and Homebrew (`Caskroom`/`Cellar`) paths. OpenCode and Kimi allow those paths and delegate updates to their own CLI; they additionally check for known legacy installation markers. These native paths do not require universal package-ownership proof.
 
 ### Per-Agent Ownership Matrix
@@ -98,11 +98,22 @@ Teemiao never guesses a package-manager owner from the mere presence of `npm`, `
      - **WinGet (`Anthropic.ClaudeCode`):** Verified WinGet package/link path (or `.winget-anthropic-claudecode` marker) and `winget list --exact --id Anthropic.ClaudeCode ...` inventory -> `<winget> upgrade --exact --id Anthropic.ClaudeCode --accept-source-agreements --accept-package-agreements --disable-interactivity`.
      - **Native (`claude update`):** Allowed only when no package-manager signal exists and native paths are proven (`/.local/share/claude/`, `/.claude/`, `/.local/bin/claude`, `~/.local/bin`, `/appdata/local/claude/`, `/appdata/local/programs/claude/`, or `.claude-native`).
 
-7. **Qoder (`qoder` / `qodercli`)**
+7. **Qoder (`qoder` / `qodercli` / `qoder-cli`)**
+   - `qoder-cli` is an argument alias only (`teemiao agents update qoder-cli`); output always uses the canonical label `Qoder (qoder)`, and no executable named `qoder-cli` is searched for.
    - Checks `qodercli` on `PATH` before falling back to `qoder`.
-   - Rejects macOS `/Qoder.app/` bundle paths (including wrapper targets) and any candidate whose `--version` or `--help` output contains desktop/IDE markers (`qoder desktop`, `qoder ide`, `qoder editor`, `qoder studio`, `desktop application`, `electron`, `--open-window`, `--new-window`, `--reuse-window`) or conflicting product banners/usage program names.
-   - **Global npm (`@qoder-ai/qodercli`):** Verified prefix, `package.json`, and `bin` entry point -> `<npm> install -g --prefix <prefix> @qoder-ai/qodercli@latest` (without needing a `--help` probe when npm ownership is already proven).
-   - **Native (`qodercli update` or `qoder update`):** Selected only when there is no Homebrew/WinGet/foreign/ambiguous-npm/wrapper signal and `--help` positively advertises the `update` command without negation. Never downloads or executes vendor installer scripts (`qoder.com/install` or `install.ps1`) and never migrates npm installations to native.
+   - Rejects IDE launchers: macOS `/Qoder.app/` and `/Qoder IDE.app/` bundle paths, Linux `/usr/share/qoder/` and `/usr/share/qoder-ide/` installations, and IDE `/remote-cli/` launchers (including wrapper targets). Also rejects any candidate whose `--version` or `--help` output contains desktop/IDE markers (`qoder desktop`, `qoder ide`, `qoder editor`, `qoder studio`, `desktop application`, `electron`, `--open-window`, `--new-window`, `--reuse-window`) or conflicting product banners/usage program names.
+   - Accepts `--help` descriptions that the CLI soft-wraps when output is piped, such as `Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive` followed by `output.` on the next line. A wrapped line is treated as part of the description it continues; a separate or conflicting product banner (for example `Acme CLI` or `Acme Qoder CLI`) is still rejected.
+   - **Qoder command dispatchers:** Qoder CLI 1.1 and later puts a dispatcher on `PATH`: `~/.qoder/entry/qoder` (or `~/.qoder-cn/entry/qoder`) on Unix, and `%USERPROFILE%\.qoder\entry\qoder.cmd` with its `qoder-dispatcher.ps1` on Windows. The dispatcher forwards CLI commands to a separate `qodercli` binary and sends IDE subcommands to Qoder IDE. Teemiao never executes the dispatcher's shell or PowerShell code to inspect it:
+     - It confirms that the dispatcher sits at one of the paths above and is a complete text file within the wrapper size limit that contains Qoder's dispatcher markers. Other `qoder` scripts are handled as ordinary wrappers.
+     - It resolves the underlying CLI from the file system in the dispatcher's own order. On Unix: `qodercli` on `PATH` (excluding dispatchers), then `~/.local/bin/qodercli`, then `~/.qoder/bin/qodercli/qodercli`. On Windows: `QODER_CLI_BIN`, then `qodercli` on `PATH`/`PATHEXT` (excluding dispatcher shims), then `%USERPROFILE%\.qoder\bin\qodercli\qodercli.exe`.
+     - It treats Qoder as absent when no underlying CLI exists, or when `--version` or `--help` exits `127` or reports `Qoder CLI is not installed`. This is what a dispatcher installed by Qoder IDE alone does.
+     - `agents list` still reports the dispatcher as the `path`, because that is what runs on `PATH`. Ownership checks and updates use the resolved `qodercli` binary.
+   - Ownership is determined from the active launcher, or from the resolved `qodercli` for a dispatcher, including its canonical path, symlink/wrapper chain, and an adjacent `.qodercli-install-resource` marker (read with the same bounded marker limit):
+     - **Global npm (`@qoder-ai/qodercli`):** Verified prefix, `package.json`, and `bin` entry point -> `<npm> install -g --prefix <prefix> @qoder-ai/qodercli@latest` (without needing a `--help` probe when npm ownership is already proven). Prerelease npm versions and a missing or unsafe `npm` require manual action. A `.qodercli-install-resource` of `npm` without a verified global prefix is ambiguous and also requires manual action.
+     - **Homebrew:** A marker of `homebrew-cask`, or a path inside Homebrew `Caskroom`/`Cellar`, reports `manual action required` with guidance to run `brew upgrade --cask qodercli` (or the matching formula upgrade).
+     - **Native (`qodercli update` or `qoder update`):** Selected only when there is no Homebrew/WinGet/foreign/ambiguous-npm/unverified-wrapper signal, and either the marker is `curl-bash` or `--help` positively advertises the `update` command without negation. For a dispatcher, Teemiao runs the verified underlying binary directly with `update`, displayed as `qodercli update`, so no shell, `cmd.exe`, or PowerShell layer is involved. Never downloads or executes vendor installer scripts (`qoder.com/install` or `install.ps1`) and never migrates npm installations to native.
+     - **Manual action required:** Foreign managers (`pnpm`, `yarn`, `bun`, `nix`, `scoop`, `chocolatey`, `winget`), a `QODER_CLI_BIN` target without ownership proof, or contradictory ownership evidence.
+   - When the version before the update was `unknown`, Qoder's `Successfully updated Qoder CLI from <old> to <new>.` message confirms the `updated` outcome (see [Post-Update Verification Rules](#post-update-verification-rules)).
 
 ## Absent Tools vs. Unsupported Installations
 
@@ -110,7 +121,7 @@ Teemiao distinguishes between tools that are **absent** from `PATH` and installa
 
 | Situation | `teemiao agents list` | `teemiao agents update` (bulk) | `teemiao agents update <agent>` (targeted) |
 |---|---|---|---|
-| **Absent tool** (not on `PATH`, non-executable file, broken symlink, desktop launcher, or unverified generic `agent`/`qoder` binary) | Omitted from output; exits `0`. | Skipped; never installed; does not cause failure. | Prints `Error: agent '<Name>' (<id>) is not installed on PATH. Teemiao only updates existing installations on PATH.` to `stderr` and exits `1`. |
+| **Absent tool** (not on `PATH`, non-executable file, broken symlink, desktop launcher, unverified generic `agent`/`qoder` binary, or a Qoder dispatcher without an installed `qodercli` that exits `127` / `Qoder CLI is not installed`) | Omitted from output; exits `0`. | Skipped; never installed; does not cause failure. | Prints `Error: agent '<Name>' (<id>) is not installed on PATH. Teemiao only updates existing installations on PATH.` to `stderr` and exits `1`. |
 | **Unsupported or ambiguous installation** (detected on `PATH`, e.g., project-local Codex `node_modules/.bin` launchers, installations owned by `pnpm`/`bun`/`yarn`/`nix`/`snap`/`flatpak`/`scoop`/`chocolatey`/system `/usr/bin`, or an unsupported channel, legacy installation, or unproven owner under the per-agent rules above) | Listed on `stdout` with `update: manual action required (<reason>)`; exits `0`. | Included in the sequence; prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary; continues to remaining agents and exits `1`. | Prints section header and `manual action required (<reason>; guidance: <guidance>)` on `stderr` and in the `stdout` summary without running an updater; exits `1`. |
 
 ## Output Streams and Formatting
@@ -193,7 +204,8 @@ Every discovery, version, help, and package-manager inventory probe runs through
 
 - **Installed agent does not appear in `teemiao agents list`:**
   - Verify that the CLI binary's directory (for example `~/.local/bin`, `~/.opencode/bin`, `~/.cursor/bin`, or your global `npm` bin directory) is present in the current process `PATH` and that the file has executable permissions (`chmod +x` on Unix).
-  - Remember that Teemiao ignores desktop app launchers (`cursor`, `antigravity`, `/Applications/Qoder.app`) and unverified generic `agent` or `qoder` binaries that lack CLI identity evidence.
+  - Remember that Teemiao ignores desktop app launchers (`cursor`, `antigravity`, `/Applications/Qoder.app`, `/Applications/Qoder IDE.app`), Linux IDE installs under `/usr/share/qoder/` or `/usr/share/qoder-ide/`, IDE `/remote-cli/` launchers, and unverified generic `agent` or `qoder` binaries that lack CLI identity evidence.
+  - If `which qoder` points at `~/.qoder/entry/qoder` (or Windows `%USERPROFILE%\.qoder\entry\qoder.cmd`) but `teemiao agents list` omits Qoder, the dispatcher is present without an installed `qodercli` (IDE-only stub). Confirm with `qoder --version`: exit `127` and `Qoder CLI is not installed` mean Teemiao correctly treats Qoder CLI as absent. Install Qoder CLI so a target exists at `~/.local/bin/qodercli`, `~/.qoder/bin/qodercli/qodercli`, Windows `%USERPROFILE%\.qoder\bin\qodercli\qodercli.exe`, or elsewhere on `PATH`, then re-run `teemiao agents list`.
 - **`manual action required` reported for an npm, Homebrew, or standalone installation:**
   - Check the `reason` and `guidance` printed on `stderr` and under `Update summary`.
   - Common causes include:
@@ -201,6 +213,6 @@ Every discovery, version, help, and package-manager inventory probe runs through
     - The installation is on a **prerelease or pinned channel** (such as `1.0.0-beta.1` or a standalone Codex installation without `auto-update-version`); Teemiao refuses to overwrite it with `@latest` / `stable`. A marker such as `0.167.0-aarch64-apple-darwin` identifies a stable release for that platform and permits automatic updates.
     - Multiple package managers or stale wrappers match the binary (`contradictory ownership metadata detected`). Remove duplicate wrappers or stale global installs so only one manager owns the active binary on `PATH`.
     - The owning package manager (`npm`, `brew`, or `winget`) is not on the current `PATH`.
-    - For Qoder (`qoder` / `qodercli`), native self-update requires `--help` to advertise `update`, and Homebrew/WinGet Qoder installations must be upgraded directly with `brew` or `winget`.
+    - For Qoder (`qoder` / `qodercli` / `qoder-cli`), native self-update requires either a `.qodercli-install-resource` of `curl-bash` or `--help` that advertises `update`. Homebrew Qoder installations (marker `homebrew-cask` or a `Caskroom`/`Cellar` path) must be upgraded with `brew upgrade --cask qodercli` (or the matching formula). WinGet and other foreign managers, unverified `QODER_CLI_BIN` overrides, and ambiguous npm metadata also require manual action.
 - **`unverified` reported after an update:**
   - The updater exited with code `0`, but either the post-update `--version` probe failed/timed out or the version remained unchanged without a recognized up-to-date message from the updater. Run `<agent> --version` directly to inspect the installation.
