@@ -2,7 +2,7 @@
 
 **Issue:** QQ-12 — Add Qoder support
 
-**Status:** Draft — awaiting Reviewer approval (`T001`)
+**Status:** Approved by Qian Qiao on 2026-11-13 in `QQ-12` comment `01a1d430-db07-70ed-a981-4c203afc2b29` (approved spec commit `b4fb6b3c6107d9f36ff1ee00c7b4e2006209bf9e`)
 
 **Date:** 2026-11-13
 

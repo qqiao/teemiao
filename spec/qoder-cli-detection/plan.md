@@ -2,7 +2,7 @@
 
 **Issue:** QQ-12
 
-**Status:** Draft — awaiting Reviewer approval (`T001`)
+**Status:** Approved by Qian Qiao on 2026-11-13 in `QQ-12` comment `01a1d430-db07-70ed-a981-4c203afc2b29` (approved spec commit `b4fb6b3c6107d9f36ff1ee00c7b4e2006209bf9e`)
 
 **Overall task branch:** `feat/qq-12-qoder-cli` (from `main` at `1ec92c726c934a12f29c5c01e401dd9c90e34520`)
 
@@ -48,7 +48,7 @@ T001 (Reviewer spec/plan/tasks approval)
 ## Task list summary
 
 ### Phase 1: Specification review
-- [ ] `T001`: Reviewer (`Qian Qiao`) approves `spec.md`, `plan.md`, and `tasks.md`.
+- [x] `T001`: Reviewer (`Qian Qiao`) approves `spec.md`, `plan.md`, and `tasks.md` (`01a1d430-db07-70ed-a981-4c203afc2b29` on `b4fb6b3c6107d9f36ff1ee00c7b4e2006209bf9e`).
 
 ### Phase 2: Parallel core implementation and documentation (Wave 1)
 - [ ] `T002`: Fix Qoder CLI discovery, `.qoder/entry` dispatcher ownership resolution, `qoder-cli` alias, and update outcome matching (`src/agents/mod.rs`, `src/agents/discovery.rs`, `src/agents/update.rs`, `tests/agents_cli.rs`).

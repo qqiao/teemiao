@@ -11,10 +11,10 @@
 **Description:** Review [`spec.md`](spec.md), [`plan.md`](plan.md), and this task breakdown for requirements accuracy, CLI/internal contracts, acceptance criteria, task sizing, and parallel dependency structure.
 
 **Acceptance criteria:**
-- [ ] Explicit approval recorded on `QQ-12` (or requested revisions addressed and re-approved) before any coder task is dispatched.
+- [x] Explicit approval recorded on `QQ-12` (or requested revisions addressed and re-approved) before any coder task is dispatched.
 
 **Verification:**
-- [ ] Approval comment and approved spec commit SHA recorded on `QQ-12`.
+- [x] Approval comment (`01a1d430-db07-70ed-a981-4c203afc2b29`) and approved spec commit SHA (`b4fb6b3c6107d9f36ff1ee00c7b4e2006209bf9e`) recorded on `QQ-12`.
 
 **Dependencies:** None
 
