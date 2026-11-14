@@ -20,6 +20,7 @@ use rust_i18n::t;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -58,6 +59,8 @@ pub struct DiscoveryEnv {
     pub codex_install_dir: Option<PathBuf>,
     /// Explicit `HOMEBREW_PREFIX` override if set in the environment.
     pub homebrew_prefix: Option<PathBuf>,
+    /// Explicit `QODER_CLI_BIN` override if set in the environment.
+    pub qoder_cli_bin: Option<PathBuf>,
     /// Whether Windows executable/shim rules apply.
     pub is_windows: bool,
 }
@@ -80,6 +83,9 @@ impl DiscoveryEnv {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             homebrew_prefix: std::env::var_os("HOMEBREW_PREFIX")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            qoder_cli_bin: std::env::var_os("QODER_CLI_BIN")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             is_windows: cfg!(windows),
@@ -624,9 +630,777 @@ fn is_version_or_build_token(raw_token: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
+#[derive(Debug, Clone, Default)]
+struct QoderTargetOrigin {
+    entry_root: Option<PathBuf>,
+    from_qoder_cli_bin: bool,
+}
+
+#[derive(Debug, Clone)]
+struct DispatcherTarget {
+    launcher_path: PathBuf,
+    resolved_path: PathBuf,
+    from_qoder_cli_bin: bool,
+}
+
+enum QoderEntryStatus {
+    NotDispatcher,
+    Invalid,
+    Verified { entry_root: PathBuf },
+}
+
+fn qoder_entry_root(path: &Path) -> Option<PathBuf> {
+    let entry_dir = path.parent()?;
+    let dir_name = entry_dir.file_name()?.to_str()?;
+    if !dir_name.eq_ignore_ascii_case("entry") {
+        return None;
+    }
+    let entry_root = entry_dir.parent()?;
+    let root_name = entry_root.file_name()?.to_string_lossy();
+    if !root_name.to_ascii_lowercase().contains("qoder") {
+        return None;
+    }
+    Some(entry_root.to_path_buf())
+}
+
+fn is_qoder_entry_dir_executable(path: &Path) -> bool {
+    qoder_entry_root(path).is_some()
+}
+
+fn read_qoder_dispatcher_text(path: &Path) -> Option<String> {
+    read_text_wrapper_sample(path).filter(|s| !s.contains('\u{fffd}'))
+}
+
+fn path_is_qoder_entry_location(path: &Path, is_windows: bool) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let name_matches = if is_windows {
+        name.eq_ignore_ascii_case("qoder.cmd") || name.eq_ignore_ascii_case("qoder")
+    } else {
+        name == "qoder"
+    };
+    name_matches && qoder_entry_root(path).is_some()
+}
+
+fn first_posix_command_word(stmt: &str) -> &str {
+    let mut rest = stmt.trim_start();
+    loop {
+        let Some(token) = rest.split_whitespace().next() else {
+            return "";
+        };
+        let is_plain_env_assign = token.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && !token.contains("$(")
+                && !token.contains('`')
+        });
+        if is_plain_env_assign && rest.len() > token.len() {
+            rest = rest[token.len()..].trim_start();
+            continue;
+        }
+        return token;
+    }
+}
+
+fn normalize_posix_statement(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    let mut rest = collapsed.as_str();
+    while let Some(stripped) = ["if ", "then ", "elif ", "else ", "do ", "! ", "{ "]
+        .iter()
+        .find_map(|prefix| rest.strip_prefix(prefix))
+    {
+        rest = stripped.trim_start();
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    if matches!(first_posix_command_word(rest), "echo" | "printf") {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+fn extract_posix_executable_statements(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start_matches('\u{feff}');
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escape = false;
+    let mut paren_depth: usize = 0;
+    let mut prev_ws_or_sep = true;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if escape {
+            escape = false;
+            if (!in_double || ch != '\n') && !in_single {
+                current.push(ch);
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+        if in_single {
+            // Single quotes suppress command/variable expansion in POSIX sh.
+            if ch == '\'' {
+                in_single = false;
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+        if in_double {
+            match ch {
+                '\\' => {
+                    escape = true;
+                    current.push(ch);
+                }
+                '"' => {
+                    in_double = false;
+                    current.push(ch);
+                }
+                _ => current.push(ch),
+            }
+            prev_ws_or_sep = false;
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escape = true;
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '\'' => {
+                in_single = true;
+                prev_ws_or_sep = false;
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '#' if prev_ws_or_sep => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                if i < chars.len() && paren_depth == 0 {
+                    if let Some(stmt) = normalize_posix_statement(&current) {
+                        statements.push(stmt);
+                    }
+                    current.clear();
+                } else {
+                    current.push(' ');
+                }
+                prev_ws_or_sep = true;
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+                prev_ws_or_sep = true;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+                prev_ws_or_sep = false;
+            }
+            '\n' | ';' if paren_depth == 0 => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+            }
+            '&' if paren_depth == 0 && i + 1 < chars.len() && chars[i + 1] == '&' => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+                i += 1;
+            }
+            '|' if paren_depth == 0 && i + 1 < chars.len() && chars[i + 1] == '|' => {
+                if let Some(stmt) = normalize_posix_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+                prev_ws_or_sep = true;
+                i += 1;
+            }
+            c if c.is_ascii_whitespace() => {
+                current.push(' ');
+                prev_ws_or_sep = true;
+            }
+            _ => {
+                current.push(ch);
+                prev_ws_or_sep = matches!(ch, ';' | '(' | '&' | '|');
+            }
+        }
+        i += 1;
+    }
+
+    if let Some(stmt) = normalize_posix_statement(&current) {
+        statements.push(stmt);
+    }
+    statements
+}
+
+fn unix_statement_has_var_exec(stmt: &str) -> bool {
+    let Some(after_exec) = stmt.strip_prefix("exec ") else {
+        return false;
+    };
+    let Some(var_pos) = after_exec.find("\"$") else {
+        return false;
+    };
+    after_exec[var_pos + 2..].contains("\"$@\"")
+}
+
+fn verify_unix_qoder_dispatcher(script_path: &Path) -> bool {
+    let Some(content) = read_qoder_dispatcher_text(script_path) else {
+        return false;
+    };
+    if !content.trim_start_matches('\u{feff}').starts_with("#!") {
+        return false;
+    }
+    if extract_verified_wrapper_exec_target(script_path).is_some() {
+        return false;
+    }
+    let statements = extract_posix_executable_statements(&content);
+    let has_lookup = statements.iter().any(|stmt| {
+        stmt.contains("command -v qodercli")
+            || stmt.contains("type -p qodercli")
+            || stmt.contains("/.local/bin/qodercli")
+            || stmt.contains("/.qoder/bin/qodercli")
+            || stmt.contains("/.qoder-cn/bin/qodercli")
+    });
+    let has_var_exec = statements
+        .iter()
+        .any(|stmt| unix_statement_has_var_exec(stmt));
+    has_lookup && has_var_exec
+}
+
+fn split_cmd_line_segments(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b'&' if !in_quotes => {
+                let prev = i.checked_sub(1).map(|idx| bytes[idx]);
+                if !matches!(prev, Some(b'>' | b'<')) {
+                    segments.push(&line[start..i]);
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+                        i += 1;
+                    }
+                    start = i + 1;
+                }
+            }
+            b'|' if !in_quotes && i + 1 < bytes.len() && bytes[i + 1] == b'|' => {
+                segments.push(&line[start..i]);
+                i += 1;
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    segments.push(&line[start..]);
+    segments
+}
+
+fn batch_keyword_matches(stmt: &str, keyword: &str) -> bool {
+    stmt == keyword
+        || stmt.strip_prefix(keyword).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_whitespace() || matches!(c, '.' | '/' | ':' | '('))
+        })
+}
+
+fn tokenize_cmd_segment(stmt: &str) -> Vec<(String, bool)> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = stmt.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        if chars[i] == '"' {
+            i += 1;
+            let mut tok = String::new();
+            while i < chars.len() && chars[i] != '"' {
+                tok.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() {
+                i += 1;
+            }
+            tokens.push((tok.to_ascii_lowercase().replace('\\', "/"), true));
+        } else {
+            let mut tok = String::new();
+            while i < chars.len() && !chars[i].is_ascii_whitespace() {
+                tok.push(chars[i]);
+                i += 1;
+            }
+            tokens.push((tok.to_ascii_lowercase().replace('\\', "/"), false));
+        }
+    }
+    tokens
+}
+
+fn verify_windows_cmd_dispatcher(cmd_text: &str) -> bool {
+    let trimmed = cmd_text.trim_start_matches('\u{feff}');
+    let mut dispatcher_vars: Vec<String> = Vec::new();
+
+    for raw_line in trimmed.lines() {
+        let trimmed_line = raw_line.trim();
+        if trimmed_line.is_empty() || trimmed_line.starts_with("::") {
+            continue;
+        }
+        for raw_seg in split_cmd_line_segments(trimmed_line) {
+            let seg = raw_seg.trim().trim_start_matches('@').trim_start();
+            if seg.is_empty() {
+                continue;
+            }
+            let seg_lower = seg.to_ascii_lowercase().replace('\\', "/");
+            if seg_lower.starts_with("::") || batch_keyword_matches(&seg_lower, "rem") {
+                break;
+            }
+            if batch_keyword_matches(&seg_lower, "echo") {
+                continue;
+            }
+            if let Some(rest) = seg_lower
+                .strip_prefix("set ")
+                .or_else(|| seg_lower.strip_prefix("set\t"))
+            {
+                let assign = rest.trim().trim_matches('"');
+                if let Some((var, val)) = assign.split_once('=') {
+                    let var_name = var.trim();
+                    let val_norm = val.trim().trim_matches('"');
+                    if !var_name.is_empty()
+                        && matches!(
+                            val_norm,
+                            "%~dp0qoder-dispatcher.ps1" | "%~dp0/qoder-dispatcher.ps1"
+                        )
+                    {
+                        dispatcher_vars.push(format!("%{var_name}%"));
+                    }
+                }
+                continue;
+            }
+
+            let tokens = tokenize_cmd_segment(seg);
+            let mut idx = 0;
+            if tokens
+                .get(idx)
+                .is_some_and(|(tok, quoted)| !quoted && tok == "call")
+            {
+                idx += 1;
+            }
+            let Some((exe_tok, _)) = tokens.get(idx) else {
+                continue;
+            };
+            let exe_name = exe_tok.rsplit('/').next().unwrap_or(exe_tok.as_str());
+            if !matches!(
+                exe_name,
+                "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+            ) {
+                continue;
+            }
+            let args = &tokens[idx + 1..];
+            let Some(file_flag_idx) = args
+                .iter()
+                .position(|(tok, quoted)| !quoted && tok == "-file")
+            else {
+                continue;
+            };
+            let Some((target_arg, _)) = args.get(file_flag_idx + 1) else {
+                continue;
+            };
+            let targets_dispatcher = matches!(
+                target_arg.as_str(),
+                "%~dp0qoder-dispatcher.ps1" | "%~dp0/qoder-dispatcher.ps1"
+            ) || dispatcher_vars.iter().any(|var| var == target_arg);
+            if targets_dispatcher && args[file_flag_idx + 2..].iter().any(|(tok, _)| tok == "%*") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn normalize_powershell_statement(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let first_word = collapsed.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first_word,
+        "write-host"
+            | "write-output"
+            | "write-debug"
+            | "write-verbose"
+            | "write-warning"
+            | "write-information"
+            | "echo"
+    ) {
+        return None;
+    }
+    Some(collapsed)
+}
+
+fn extract_powershell_executable_statements(content: &str) -> Vec<String> {
+    let trimmed = content.trim_start_matches('\u{feff}');
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_block_comment = false;
+    let mut backtick = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_block_comment {
+            if ch == '#' && i + 1 < chars.len() && chars[i + 1] == '>' {
+                in_block_comment = false;
+                current.push(' ');
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_single {
+            current.push(ch);
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    current.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            current.push(ch);
+            if backtick {
+                backtick = false;
+            } else if ch == '`' {
+                backtick = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if ch == '<' && i + 1 < chars.len() && chars[i + 1] == '#' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if ch == '#' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            if let Some(stmt) = normalize_powershell_statement(&current) {
+                statements.push(stmt);
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+            }
+            '\n' | '\r' | ';' | '{' | '}' => {
+                if let Some(stmt) = normalize_powershell_statement(&current) {
+                    statements.push(stmt);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+        i += 1;
+    }
+
+    if let Some(stmt) = normalize_powershell_statement(&current) {
+        statements.push(stmt);
+    }
+    statements
+}
+
+fn verify_windows_ps1_dispatcher(ps_text: &str) -> bool {
+    let statements = extract_powershell_executable_statements(ps_text);
+    let has_lookup = statements.iter().any(|stmt| {
+        stmt.contains("$env:qoder_cli_bin")
+            || stmt.contains("$env:qodercn_cli_bin")
+            || stmt.contains("get-command qodercli")
+            || stmt.contains("get-command \"qodercli\"")
+            || stmt.contains("get-command 'qodercli'")
+            || stmt.contains(".qoder/bin/qodercli/qodercli.exe")
+            || stmt.contains(".qoder-cn/bin/qodercli/qodercli.exe")
+    });
+    let has_var_call = statements.iter().any(|stmt| {
+        let starts_with_var_call = stmt.starts_with("& $") || stmt.starts_with("& \"$");
+        starts_with_var_call
+            && stmt
+                .split_whitespace()
+                .any(|tok| matches!(tok, "@args" | "@argv" | "$args"))
+    });
+    has_lookup && has_var_call
+}
+
+fn verify_windows_qoder_dispatcher(cmd_path: &Path) -> bool {
+    let has_cmd_ext = cmd_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd"));
+    if !has_cmd_ext {
+        return false;
+    }
+    let Some(cmd_text) = read_qoder_dispatcher_text(cmd_path) else {
+        return false;
+    };
+    if !verify_windows_cmd_dispatcher(&cmd_text) {
+        return false;
+    }
+    let Some(entry_dir) = cmd_path.parent() else {
+        return false;
+    };
+    let ps1_path = entry_dir.join("qoder-dispatcher.ps1");
+    let ps1_resolved = canonicalize_clean(&ps1_path);
+    if path_has_qoder_desktop_bundle(&ps1_path, &ps1_resolved) {
+        return false;
+    }
+    let Some(ps_text) = read_qoder_dispatcher_text(&ps1_path) else {
+        return false;
+    };
+    verify_windows_ps1_dispatcher(&ps_text)
+}
+
+fn is_compiled_native_binary(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::with_capacity(4);
+    if file.take(4).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    if buf.len() >= 2 && &buf[..2] == b"MZ" {
+        return true;
+    }
+    buf.len() == 4
+        && matches!(
+            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            0x7F45_4C46 // ELF
+                | 0xFEED_FACE // Mach-O 32-bit BE
+                | 0xCEFA_EDFE // Mach-O 32-bit LE
+                | 0xFEED_FACF // Mach-O 64-bit BE
+                | 0xCFFA_EDFE // Mach-O 64-bit LE
+                | 0xCAFE_BABE // Mach-O Universal BE
+                | 0xBEBA_FECA // Mach-O Universal LE
+                | 0xCAFE_BABF // Mach-O Universal64 BE
+                | 0xBFBA_FECA // Mach-O Universal64 LE
+        )
+}
+
+fn classify_qoder_entry_dispatcher(
+    launcher_path: &Path,
+    resolved_path: &Path,
+    env: &DiscoveryEnv,
+) -> QoderEntryStatus {
+    let launcher_in_entry = path_is_qoder_entry_location(launcher_path, env.is_windows);
+    let resolved_in_entry = path_is_qoder_entry_location(resolved_path, env.is_windows);
+    if !launcher_in_entry && !resolved_in_entry {
+        return QoderEntryStatus::NotDispatcher;
+    }
+
+    let check_path = if resolved_in_entry {
+        resolved_path
+    } else {
+        launcher_path
+    };
+    let Some(entry_root) =
+        qoder_entry_root(launcher_path).or_else(|| qoder_entry_root(resolved_path))
+    else {
+        return QoderEntryStatus::NotDispatcher;
+    };
+
+    let verified = if env.is_windows {
+        verify_windows_qoder_dispatcher(check_path)
+    } else {
+        verify_unix_qoder_dispatcher(check_path)
+    };
+    if verified {
+        return QoderEntryStatus::Verified { entry_root };
+    }
+
+    // If `.qoder*/entry/qoder` is a direct file (or symlink inside entry) that fails bounded
+    // dispatcher verification, fail closed so oversized or unverified scripts are never executed.
+    if !resolved_in_entry
+        && launcher_path != resolved_path
+        && is_compiled_native_binary(resolved_path)
+    {
+        // Direct symlink outside `entry/` pointing to a compiled binary (e.g. Mach-O/ELF/PE).
+        return QoderEntryStatus::NotDispatcher;
+    }
+    QoderEntryStatus::Invalid
+}
+
+fn resolve_qodercli_on_path(env: &DiscoveryEnv) -> Option<(PathBuf, PathBuf)> {
+    resolve_executable_on_path_filtering("qodercli", env, |launcher, resolved| {
+        !path_is_qoder_entry_location(launcher, env.is_windows)
+            && !path_is_qoder_entry_location(resolved, env.is_windows)
+            && !is_qoder_entry_dir_executable(launcher)
+            && !is_qoder_entry_dir_executable(resolved)
+    })
+    .map(|(_, l, r)| (l, r))
+}
+
+fn resolve_qoder_dispatcher_target(
+    entry_root: &Path,
+    env: &DiscoveryEnv,
+) -> Option<DispatcherTarget> {
+    if env.is_windows {
+        if let Some(override_path) = &env.qoder_cli_bin
+            && !path_is_qoder_entry_location(override_path, true)
+            && !is_qoder_entry_dir_executable(override_path)
+            && is_runnable_file(override_path, true)
+        {
+            return Some(DispatcherTarget {
+                launcher_path: override_path.clone(),
+                resolved_path: canonicalize_clean(override_path),
+                from_qoder_cli_bin: true,
+            });
+        }
+        if let Some((launcher_path, resolved_path)) = resolve_qodercli_on_path(env) {
+            return Some(DispatcherTarget {
+                launcher_path,
+                resolved_path,
+                from_qoder_cli_bin: false,
+            });
+        }
+        let mut fallback_candidates =
+            vec![entry_root.join("bin").join("qodercli").join("qodercli.exe")];
+        if let Some(home) = &env.home_dir {
+            let home_cand = home
+                .join(".qoder")
+                .join("bin")
+                .join("qodercli")
+                .join("qodercli.exe");
+            if !fallback_candidates.contains(&home_cand) {
+                fallback_candidates.push(home_cand);
+            }
+        }
+        for cand in fallback_candidates {
+            if is_runnable_file(&cand, true) {
+                return Some(DispatcherTarget {
+                    resolved_path: canonicalize_clean(&cand),
+                    launcher_path: cand,
+                    from_qoder_cli_bin: false,
+                });
+            }
+        }
+        None
+    } else {
+        if let Some((launcher_path, resolved_path)) = resolve_qodercli_on_path(env) {
+            return Some(DispatcherTarget {
+                launcher_path,
+                resolved_path,
+                from_qoder_cli_bin: false,
+            });
+        }
+        let mut fallback_candidates = Vec::new();
+        if let Some(home) = &env.home_dir {
+            fallback_candidates.push(home.join(".local").join("bin").join("qodercli"));
+        }
+        fallback_candidates.push(entry_root.join("bin").join("qodercli").join("qodercli"));
+        if let Some(home) = &env.home_dir {
+            let home_cand = home
+                .join(".qoder")
+                .join("bin")
+                .join("qodercli")
+                .join("qodercli");
+            if !fallback_candidates.contains(&home_cand) {
+                fallback_candidates.push(home_cand);
+            }
+        }
+        for cand in fallback_candidates {
+            if is_runnable_file(&cand, false) {
+                return Some(DispatcherTarget {
+                    resolved_path: canonicalize_clean(&cand),
+                    launcher_path: cand,
+                    from_qoder_cli_bin: false,
+                });
+            }
+        }
+        None
+    }
+}
+
 /// Discovers Qoder CLI, preferring `qodercli` on `PATH` and falling back to a verified
 /// `qoder` CLI binary while rejecting Qoder Desktop/IDE launchers and unrelated tools.
 fn discover_qoder(env: &DiscoveryEnv, runner: &dyn ProcessRunner) -> Option<DiscoveredAgent> {
+    if env.is_windows
+        && env.qoder_cli_bin.is_some()
+        && let Some((entry_idx, entry_launcher, entry_resolved)) =
+            resolve_executable_on_path_filtering("qoder", env, |_, _| true)
+    {
+        let cli_idx = resolve_executable_on_path_filtering("qodercli", env, |_, _| true)
+            .map(|(idx, _, _)| idx);
+        if cli_idx.is_none_or(|cidx| entry_idx < cidx)
+            && matches!(
+                classify_qoder_entry_dispatcher(&entry_launcher, &entry_resolved, env),
+                QoderEntryStatus::Verified { .. }
+            )
+            && let Some(verified) =
+                try_verify_qoder_candidate("qoder", entry_launcher, entry_resolved, env, runner)
+        {
+            return Some(verified);
+        }
+    }
+
     for &candidate in AgentId::Qoder.cli_candidates() {
         if let Some((launcher_path, resolved_path)) = resolve_executable_on_path(candidate, env)
             && let Some(verified) =
@@ -638,6 +1412,16 @@ fn discover_qoder(env: &DiscoveryEnv, runner: &dyn ProcessRunner) -> Option<Disc
     None
 }
 
+#[derive(Debug, Clone)]
+struct QoderResolvedTarget {
+    is_dedicated_cli_name: bool,
+    public_launcher_path: PathBuf,
+    public_resolved_path: PathBuf,
+    target_launcher_path: PathBuf,
+    target_resolved_path: PathBuf,
+    origin: QoderTargetOrigin,
+}
+
 fn try_verify_qoder_candidate(
     candidate: &str,
     launcher_path: PathBuf,
@@ -645,8 +1429,62 @@ fn try_verify_qoder_candidate(
     env: &DiscoveryEnv,
     runner: &dyn ProcessRunner,
 ) -> Option<DiscoveredAgent> {
-    let wrapper_targets = collect_verified_wrapper_targets(&launcher_path, &resolved_path);
-    if path_has_qoder_desktop_bundle(&launcher_path, &resolved_path)
+    if path_has_qoder_desktop_bundle(&launcher_path, &resolved_path) {
+        return None;
+    }
+
+    match classify_qoder_entry_dispatcher(&launcher_path, &resolved_path, env) {
+        QoderEntryStatus::Invalid => None,
+        QoderEntryStatus::Verified { entry_root } => {
+            let target = resolve_qoder_dispatcher_target(&entry_root, env)?;
+            verify_qoder_target_candidate(
+                QoderResolvedTarget {
+                    is_dedicated_cli_name: true,
+                    public_launcher_path: launcher_path,
+                    public_resolved_path: target.resolved_path.clone(),
+                    target_launcher_path: target.launcher_path,
+                    target_resolved_path: target.resolved_path,
+                    origin: QoderTargetOrigin {
+                        entry_root: Some(entry_root),
+                        from_qoder_cli_bin: target.from_qoder_cli_bin,
+                    },
+                },
+                env,
+                runner,
+            )
+        }
+        QoderEntryStatus::NotDispatcher => verify_qoder_target_candidate(
+            QoderResolvedTarget {
+                is_dedicated_cli_name: candidate.eq_ignore_ascii_case("qodercli"),
+                public_launcher_path: launcher_path.clone(),
+                public_resolved_path: resolved_path.clone(),
+                target_launcher_path: launcher_path,
+                target_resolved_path: resolved_path,
+                origin: QoderTargetOrigin::default(),
+            },
+            env,
+            runner,
+        ),
+    }
+}
+
+fn verify_qoder_target_candidate(
+    candidate: QoderResolvedTarget,
+    env: &DiscoveryEnv,
+    runner: &dyn ProcessRunner,
+) -> Option<DiscoveredAgent> {
+    let QoderResolvedTarget {
+        is_dedicated_cli_name,
+        public_launcher_path,
+        public_resolved_path,
+        target_launcher_path,
+        target_resolved_path,
+        origin,
+    } = candidate;
+
+    let wrapper_targets =
+        collect_verified_wrapper_targets(&target_launcher_path, &target_resolved_path);
+    if path_has_qoder_desktop_bundle(&target_launcher_path, &target_resolved_path)
         || wrapper_targets
             .iter()
             .any(|(t, rt)| path_has_qoder_desktop_bundle(t, rt))
@@ -654,12 +1492,36 @@ fn try_verify_qoder_candidate(
         return None;
     }
 
-    let is_dedicated_cli_name = candidate.eq_ignore_ascii_case("qodercli");
+    if origin.from_qoder_cli_bin && !target_launcher_path.is_absolute() {
+        let warning = t!(
+            "agents.warning.probe_failed",
+            name = AgentId::Qoder.display_name(),
+            path = target_launcher_path.display(),
+            detail = "relative QODER_CLI_BIN override path"
+        )
+        .to_string();
+        return Some(DiscoveredAgent {
+            id: AgentId::Qoder,
+            version: None,
+            owner: UpdateOwner::ManualActionRequired {
+                reason: "QODER_CLI_BIN override must be an absolute path".to_string(),
+                guidance:
+                    "Set QODER_CLI_BIN to a verified absolute qodercli executable path, or unset it."
+                        .to_string(),
+            },
+            launcher_path: public_launcher_path,
+            resolved_path: public_resolved_path,
+            warnings: vec![warning],
+        });
+    }
 
-    if env.is_windows && is_unsafe_windows_cmd_shim(&launcher_path) {
+    if env.is_windows
+        && (is_unsafe_windows_cmd_shim(&public_launcher_path)
+            || is_unsafe_windows_cmd_shim(&target_launcher_path))
+    {
         let npm_entry_verified = detect_npm_ownership(
-            &launcher_path,
-            &resolved_path,
+            &target_launcher_path,
+            &target_resolved_path,
             None,
             "@qoder-ai/qodercli",
             env.is_windows,
@@ -668,10 +1530,15 @@ fn try_verify_qoder_candidate(
         if !is_dedicated_cli_name && !npm_entry_verified {
             return None;
         }
+        let unsafe_path = if is_unsafe_windows_cmd_shim(&public_launcher_path) {
+            &public_launcher_path
+        } else {
+            &target_launcher_path
+        };
         let warning = t!(
             "agents.warning.probe_failed",
             name = AgentId::Qoder.display_name(),
-            path = launcher_path.display(),
+            path = unsafe_path.display(),
             detail = "unsafe Windows .cmd shim path metacharacters"
         )
         .to_string();
@@ -684,14 +1551,14 @@ fn try_verify_qoder_candidate(
                     "Reinstall Qoder CLI in a standard directory without cmd.exe metacharacters."
                         .to_string(),
             },
-            launcher_path,
-            resolved_path,
+            launcher_path: public_launcher_path,
+            resolved_path: public_resolved_path,
             warnings: vec![warning],
         });
     }
 
     let mut warnings = Vec::new();
-    let probe_result = run_bounded_probe(&launcher_path, &["--version"], runner);
+    let probe_result = run_bounded_probe(&target_launcher_path, &["--version"], runner);
 
     match probe_result {
         Ok(version_out) => {
@@ -701,6 +1568,8 @@ fn try_verify_qoder_candidate(
                 String::from_utf8_lossy(&version_out.stderr)
             );
             if has_qoder_desktop_or_ide_signature(&version_text)
+                || has_qoder_cli_not_installed_signature(&version_text)
+                || version_out.status_code == Some(127)
                 || (version_out.success && has_conflicting_non_qoder_product(&version_text))
             {
                 return None;
@@ -708,51 +1577,67 @@ fn try_verify_qoder_candidate(
 
             let version = interpret_version_probe_output(
                 AgentId::Qoder,
-                &launcher_path,
+                &target_launcher_path,
                 &version_out,
                 &mut warnings,
             );
 
             let npm_signal = detect_npm_ownership(
-                &launcher_path,
-                &resolved_path,
+                &target_launcher_path,
+                &target_resolved_path,
                 version.as_deref(),
                 "@qoder-ai/qodercli",
                 env.is_windows,
             );
 
             let mut help_text: Option<String> = None;
+            let mut help_negated_update = false;
             if npm_signal.is_none()
                 && !version_out.timed_out
                 && !version_out.stdout_truncated
                 && !version_out.stderr_truncated
                 && version_out.status_code.is_some()
-                && let Ok(help_out) = run_bounded_probe(&launcher_path, &["--help"], runner)
-                && !help_out.timed_out
-                && !help_out.stdout_truncated
-                && !help_out.stderr_truncated
+                && let Ok(help_out) = run_bounded_probe(&target_launcher_path, &["--help"], runner)
             {
-                let combined_help = format!(
-                    "{}\n{}",
-                    String::from_utf8_lossy(&help_out.stdout),
-                    String::from_utf8_lossy(&help_out.stderr)
-                );
-                if has_qoder_desktop_or_ide_signature(&combined_help)
-                    || help_has_conflicting_usage_program(&combined_help)
-                    || help_has_conflicting_product_banner(&combined_help)
-                {
+                if help_out.status_code == Some(127) {
                     return None;
                 }
-                if help_out.success {
-                    help_text = Some(combined_help);
+                if !help_out.timed_out && !help_out.stdout_truncated && !help_out.stderr_truncated {
+                    let combined_help = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&help_out.stdout),
+                        String::from_utf8_lossy(&help_out.stderr)
+                    );
+                    if has_qoder_desktop_or_ide_signature(&combined_help)
+                        || has_qoder_cli_not_installed_signature(&combined_help)
+                        || help_has_conflicting_usage_program(&combined_help)
+                        || help_has_conflicting_product_banner(&combined_help)
+                    {
+                        return None;
+                    }
+                    if help_out.success {
+                        help_text = Some(combined_help);
+                    } else if help_output_negates_update(&combined_help) {
+                        help_negated_update = true;
+                    }
                 }
             }
+
+            let install_resource = detect_qoder_install_resource(
+                &target_launcher_path,
+                &target_resolved_path,
+                &wrapper_targets,
+                env.is_windows,
+            );
+            let has_verified_install_resource = matches!(install_resource, Ok(Some(_)))
+                && !has_conflicting_non_qoder_product(&version_text);
 
             let is_verified_cli = npm_signal.is_some()
                 || version_has_qoder_cli_branding(&version_text)
                 || help_text
                     .as_deref()
                     .is_some_and(help_has_qoder_cli_evidence)
+                || has_verified_install_resource
                 || (is_dedicated_cli_name
                     && (!version_out.success
                         || version_text.to_ascii_lowercase().contains("qoder")));
@@ -761,32 +1646,38 @@ fn try_verify_qoder_candidate(
                 return None;
             }
 
+            let help_checked = help_text.is_some() || help_negated_update;
             let has_native_update_cmd = help_text
                 .as_deref()
                 .is_some_and(help_supports_qoder_native_update);
-            let owner = determine_qoder_owner(
-                &launcher_path,
-                &resolved_path,
-                &wrapper_targets,
-                version.as_deref(),
-                npm_signal,
-                has_native_update_cmd,
+            let owner = determine_qoder_owner_with_origin(
+                QoderOwnerInput {
+                    launcher_path: &target_launcher_path,
+                    resolved_path: &target_resolved_path,
+                    wrapper_targets: &wrapper_targets,
+                    version: version.as_deref(),
+                    npm_signal,
+                    install_resource: Some(install_resource),
+                    has_native_update_cmd,
+                    help_checked,
+                    origin: &origin,
+                },
                 env,
             );
 
             Some(DiscoveredAgent {
                 id: AgentId::Qoder,
                 version,
-                launcher_path,
-                resolved_path,
+                launcher_path: public_launcher_path,
+                resolved_path: public_resolved_path,
                 owner,
                 warnings,
             })
         }
         Err(err) => {
             let npm_signal = detect_npm_ownership(
-                &launcher_path,
-                &resolved_path,
+                &target_launcher_path,
+                &target_resolved_path,
                 None,
                 "@qoder-ai/qodercli",
                 env.is_windows,
@@ -798,25 +1689,30 @@ fn try_verify_qoder_candidate(
                 t!(
                     "agents.warning.probe_failed",
                     name = AgentId::Qoder.display_name(),
-                    path = launcher_path.display(),
+                    path = target_launcher_path.display(),
                     detail = err.to_string()
                 )
                 .to_string(),
             );
-            let owner = determine_qoder_owner(
-                &launcher_path,
-                &resolved_path,
-                &wrapper_targets,
-                None,
-                npm_signal,
-                false,
+            let owner = determine_qoder_owner_with_origin(
+                QoderOwnerInput {
+                    launcher_path: &target_launcher_path,
+                    resolved_path: &target_resolved_path,
+                    wrapper_targets: &wrapper_targets,
+                    version: None,
+                    npm_signal,
+                    install_resource: None,
+                    has_native_update_cmd: false,
+                    help_checked: false,
+                    origin: &origin,
+                },
                 env,
             );
             Some(DiscoveredAgent {
                 id: AgentId::Qoder,
                 version: None,
-                launcher_path,
-                resolved_path,
+                launcher_path: public_launcher_path,
+                resolved_path: public_resolved_path,
                 owner,
                 warnings,
             })
@@ -830,11 +1726,25 @@ fn path_has_qoder_desktop_bundle(launcher_path: &Path, resolved_path: &Path) -> 
             .to_string_lossy()
             .replace('\\', "/")
             .to_ascii_lowercase();
-        if normalized.contains("/qoder.app/") {
+        if normalized.contains("/qoder.app/")
+            || normalized.contains("/qoder ide.app/")
+            || normalized.contains("/qoder-ide.app/")
+            || normalized.contains("/usr/share/qoder-ide/")
+            || normalized.contains("/usr/share/qoder/")
+            || normalized.contains("/remote-cli/")
+        {
             return true;
         }
     }
     false
+}
+
+fn has_qoder_cli_not_installed_signature(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("qoder cli is not installed")
+        || lower.contains("qodercli is not installed")
+        || lower.contains("qoder-cli is not installed")
+        || lower.contains("qoder cli not installed")
 }
 
 fn has_qoder_desktop_or_ide_signature(text: &str) -> bool {
@@ -908,6 +1818,9 @@ fn has_conflicting_non_qoder_product(text: &str) -> bool {
 }
 
 fn version_has_qoder_cli_branding(text: &str) -> bool {
+    if has_qoder_cli_not_installed_signature(text) {
+        return false;
+    }
     let lower = text.to_ascii_lowercase();
     lower.contains("qodercli")
         || lower.contains("qoder cli")
@@ -1004,6 +1917,7 @@ fn is_usage_synopsis_line(trimmed: &str) -> bool {
 enum HelpLine<'a> {
     UsageSynopsis(&'a str),
     Preamble(&'a str),
+    PreambleBreak,
     Body(&'a str),
 }
 
@@ -1018,6 +1932,12 @@ fn parse_help_lines(help_text: &str) -> Vec<HelpLine<'_>> {
         if trimmed.is_empty() {
             if in_usage_block && usage_saw_synopsis {
                 in_usage_block = false;
+            }
+            if !past_section_break
+                && !in_usage_block
+                && matches!(out.last(), Some(HelpLine::Preamble(_)))
+            {
+                out.push(HelpLine::PreambleBreak);
             }
             continue;
         }
@@ -1242,30 +2162,36 @@ fn split_sentence_banner_and_description(trimmed: &str) -> (&str, Option<&str>) 
     }
 }
 
-fn preamble_line_has_conflicting_banner(trimmed: &str) -> bool {
+fn is_exempt_preamble_line(trimmed: &str) -> bool {
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("error:")
+    lower.starts_with("error:")
         || lower.starts_with("fatal:")
         || lower.starts_with("warning:")
         || lower.starts_with("note:")
         || lower.starts_with('-')
         || lower.starts_with('*')
         || line_negates_or_rejects_update(&lower)
-    {
+}
+
+fn split_banner_separator(trimmed: &str) -> Option<(&str, &str)> {
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("http://") || lower.contains("https://") {
+        return None;
+    }
+    [" - ", " — ", " – ", ": "]
+        .into_iter()
+        .find_map(|sep| trimmed.split_once(sep))
+        .map(|(left, right)| (left.trim(), right.trim()))
+        .filter(|(banner, _)| !banner.is_empty())
+}
+
+fn preamble_line_has_conflicting_banner(trimmed: &str) -> bool {
+    if is_exempt_preamble_line(trimmed) {
         return false;
     }
-    if !lower.contains("http://") && !lower.contains("https://") {
-        let split_sep = [" - ", " — ", " – ", ": "]
-            .into_iter()
-            .find_map(|sep| trimmed.split_once(sep));
-        if let Some((left, right)) = split_sep {
-            let banner = left.trim();
-            let description = right.trim();
-            if !banner.is_empty() {
-                return is_conflicting_banner_segment(banner)
-                    || description_has_conflicting_brand(description);
-            }
-        }
+    if let Some((banner, description)) = split_banner_separator(trimmed) {
+        return is_conflicting_banner_segment(banner)
+            || description_has_conflicting_brand(description);
     }
     if is_unbranded_description_line(trimmed) {
         return false;
@@ -1276,6 +2202,71 @@ fn preamble_line_has_conflicting_banner(trimmed: &str) -> bool {
             || description.is_some_and(description_has_conflicting_brand);
     }
     is_conflicting_banner_segment(trimmed)
+}
+
+fn preamble_paragraph_has_conflicting_banner(paragraph: &[&str]) -> bool {
+    if paragraph.len() <= 1 {
+        return paragraph
+            .first()
+            .is_some_and(|line| preamble_line_has_conflicting_banner(line));
+    }
+
+    let mut desc_accum: Option<String> = None;
+    for (idx, &trimmed) in paragraph.iter().enumerate() {
+        if is_exempt_preamble_line(trimmed) {
+            continue;
+        }
+        if let Some(accum) = desc_accum.as_mut() {
+            if !accum.is_empty() {
+                accum.push(' ');
+            }
+            accum.push_str(trimmed);
+            if description_has_conflicting_brand(trimmed)
+                || description_has_conflicting_brand(accum)
+            {
+                return true;
+            }
+            continue;
+        }
+        if let Some((banner, description)) = split_banner_separator(trimmed) {
+            if is_conflicting_banner_segment(banner)
+                || description_has_conflicting_brand(description)
+            {
+                return true;
+            }
+            desc_accum = Some(description.to_string());
+            continue;
+        }
+        if is_unbranded_description_line(trimmed) {
+            desc_accum = Some(trimmed.to_string());
+            continue;
+        }
+        if ends_with_sentence_punctuation(trimmed) {
+            let (banner, description) = split_sentence_banner_and_description(trimmed);
+            if is_conflicting_banner_segment(banner)
+                || description.is_some_and(description_has_conflicting_brand)
+            {
+                return true;
+            }
+            if let Some(desc) = description {
+                desc_accum = Some(desc.to_string());
+            }
+            continue;
+        }
+        let (line_banner, line_desc) = split_sentence_banner_and_description(trimmed);
+        if line_desc.is_some() && !is_conflicting_banner_segment(line_banner) {
+            let joined = paragraph[idx..].join(" ");
+            if ends_with_sentence_punctuation(&joined) {
+                let (banner, description) = split_sentence_banner_and_description(&joined);
+                return is_conflicting_banner_segment(banner)
+                    || description.is_some_and(description_has_conflicting_brand);
+            }
+        }
+        if is_conflicting_banner_segment(trimmed) {
+            return true;
+        }
+    }
+    false
 }
 
 fn help_lines_have_conflicting_usage_program(lines: &[HelpLine<'_>]) -> bool {
@@ -1290,10 +2281,19 @@ fn help_lines_have_conflicting_usage_program(lines: &[HelpLine<'_>]) -> bool {
 }
 
 fn help_lines_have_conflicting_product_banner(lines: &[HelpLine<'_>]) -> bool {
-    lines.iter().any(|line| match line {
-        HelpLine::Preamble(trimmed) => preamble_line_has_conflicting_banner(trimmed),
-        _ => false,
-    })
+    let mut paragraph: Vec<&str> = Vec::new();
+    for &line in lines {
+        match line {
+            HelpLine::Preamble(trimmed) => paragraph.push(trimmed),
+            HelpLine::PreambleBreak | HelpLine::UsageSynopsis(_) | HelpLine::Body(_) => {
+                if !paragraph.is_empty() && preamble_paragraph_has_conflicting_banner(&paragraph) {
+                    return true;
+                }
+                paragraph.clear();
+            }
+        }
+    }
+    !paragraph.is_empty() && preamble_paragraph_has_conflicting_banner(&paragraph)
 }
 
 fn help_has_conflicting_usage_program(help_text: &str) -> bool {
@@ -1307,6 +2307,7 @@ fn help_has_conflicting_product_banner(help_text: &str) -> bool {
 fn help_has_qoder_cli_evidence(help_text: &str) -> bool {
     let parsed_lines = parse_help_lines(help_text);
     if has_qoder_desktop_or_ide_signature(help_text)
+        || has_qoder_cli_not_installed_signature(help_text)
         || help_lines_have_conflicting_usage_program(&parsed_lines)
         || help_lines_have_conflicting_product_banner(&parsed_lines)
     {
@@ -1399,12 +2400,21 @@ fn description_targets_unrelated_artifact(lower_desc: &str) -> bool {
 fn help_supports_qoder_native_update(help_text: &str) -> bool {
     let parsed_lines = parse_help_lines(help_text);
     if has_qoder_desktop_or_ide_signature(help_text)
+        || has_qoder_cli_not_installed_signature(help_text)
         || help_lines_have_conflicting_usage_program(&parsed_lines)
         || help_lines_have_conflicting_product_banner(&parsed_lines)
     {
         return false;
     }
     help_lines_support_qoder_native_update(help_text, &parsed_lines)
+}
+
+fn help_output_negates_update(help_text: &str) -> bool {
+    help_text.lines().any(|raw_line| {
+        let lower = raw_line.trim().to_ascii_lowercase();
+        (lower.contains("update") || lower.contains("upgrade"))
+            && line_negates_or_rejects_update(&lower)
+    })
 }
 
 fn help_lines_support_qoder_native_update(help_text: &str, parsed_lines: &[HelpLine<'_>]) -> bool {
@@ -1414,19 +2424,13 @@ fn help_lines_support_qoder_native_update(help_text: &str, parsed_lines: &[HelpL
     }
     let has_cli_branding = version_has_qoder_cli_branding(&full_lower);
 
-    for raw_line in help_text.lines() {
-        let lower = raw_line.trim().to_ascii_lowercase();
-        if lower.is_empty() {
-            continue;
-        }
-        if lower.starts_with("error:") || lower.starts_with("fatal:") {
-            return false;
-        }
-        if (lower.contains("update") || lower.contains("upgrade"))
-            && line_negates_or_rejects_update(&lower)
-        {
-            return false;
-        }
+    if help_output_negates_update(help_text)
+        || help_text.lines().any(|raw_line| {
+            let lower = raw_line.trim().to_ascii_lowercase();
+            lower.starts_with("error:") || lower.starts_with("fatal:")
+        })
+    {
+        return false;
     }
 
     for &line in parsed_lines {
@@ -1493,6 +2497,7 @@ fn help_lines_support_qoder_native_update(help_text: &str, parsed_lines: &[HelpL
                     }
                 }
             }
+            HelpLine::PreambleBreak => {}
         }
     }
     false
@@ -1616,15 +2621,192 @@ fn detect_homebrew_in_target_prefix(
     out
 }
 
-fn determine_qoder_owner(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QoderInstallResource {
+    CurlBash,
+    HomebrewCask,
+    HomebrewFormula,
+    Npm,
+}
+
+fn detect_qoder_install_resource(
     launcher_path: &Path,
     resolved_path: &Path,
     wrapper_targets: &[(PathBuf, PathBuf)],
-    version: Option<&str>,
+    is_windows: bool,
+) -> Result<Option<QoderInstallResource>, String> {
+    let mut dirs: Vec<&Path> = Vec::new();
+    for path in std::iter::once(launcher_path)
+        .chain(std::iter::once(resolved_path))
+        .chain(
+            wrapper_targets
+                .iter()
+                .flat_map(|(t, rt)| [t.as_path(), rt.as_path()]),
+        )
+    {
+        if let Some(parent) = path.parent()
+            && !dirs
+                .iter()
+                .any(|existing| paths_refer_to_same_dir(existing, parent, is_windows))
+        {
+            dirs.push(parent);
+        }
+    }
+
+    let mut found: Vec<QoderInstallResource> = Vec::new();
+    for dir in dirs {
+        let marker_path = dir.join(".qodercli-install-resource");
+        let sym_meta = match fs::symlink_metadata(&marker_path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Err(format!(
+                    "unreadable .qodercli-install-resource metadata at {}",
+                    marker_path.display()
+                ));
+            }
+        };
+        if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_file() {
+            return Err(format!(
+                "unreadable, symlinked, or oversized .qodercli-install-resource at {}",
+                marker_path.display()
+            ));
+        }
+        let Ok(text) = read_discovery_metadata(&marker_path) else {
+            return Err(format!(
+                "unreadable, symlinked, or oversized .qodercli-install-resource at {}",
+                marker_path.display()
+            ));
+        };
+        if text.contains('\0') {
+            return Err(format!(
+                "invalid binary content in .qodercli-install-resource at {}",
+                marker_path.display()
+            ));
+        }
+        let resource = match text.trim().to_ascii_lowercase().as_str() {
+            "curl-bash" => QoderInstallResource::CurlBash,
+            "homebrew-cask" => QoderInstallResource::HomebrewCask,
+            "homebrew" | "homebrew-formula" => QoderInstallResource::HomebrewFormula,
+            "npm" => QoderInstallResource::Npm,
+            other => {
+                return Err(format!(
+                    "unrecognized .qodercli-install-resource marker value '{other}'"
+                ));
+            }
+        };
+        if !found.contains(&resource) {
+            found.push(resource);
+        }
+    }
+
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.into_iter().next()),
+        _ => Err("contradictory .qodercli-install-resource markers detected".to_string()),
+    }
+}
+
+fn is_canonical_qoder_standalone_path(
+    path: &Path,
+    entry_root: Option<&Path>,
+    env: &DiscoveryEnv,
+) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    if normalized.ends_with("/.qoder/bin/qodercli/qodercli")
+        || normalized.ends_with("/.qoder/bin/qodercli/qodercli.exe")
+        || normalized.ends_with("/.qoder-cn/bin/qodercli/qodercli")
+        || normalized.ends_with("/.qoder-cn/bin/qodercli/qodercli.exe")
+    {
+        return true;
+    }
+    if let Some(root) = entry_root {
+        for name in ["qodercli", "qodercli.exe"] {
+            let expected = root.join("bin").join("qodercli").join(name);
+            if paths_refer_to_same_dir(path, &expected, env.is_windows) {
+                return true;
+            }
+        }
+    }
+    if let Some(home) = &env.home_dir {
+        let local_expected = home.join(".local").join("bin").join("qodercli");
+        if paths_refer_to_same_dir(path, &local_expected, env.is_windows) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_verified_qoder_cli_bin_standalone(
+    launcher_path: &Path,
+    resolved_path: &Path,
+    install_res: Option<&QoderInstallResource>,
+    entry_root: Option<&Path>,
+    env: &DiscoveryEnv,
+) -> bool {
+    if !launcher_path.is_absolute() || is_unsafe_windows_cmd_shim(launcher_path) {
+        return false;
+    }
+    let has_cli_stem = launcher_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("qodercli"));
+    if !has_cli_stem {
+        return false;
+    }
+    matches!(install_res, Some(QoderInstallResource::CurlBash))
+        || is_canonical_qoder_standalone_path(launcher_path, entry_root, env)
+        || is_canonical_qoder_standalone_path(resolved_path, entry_root, env)
+}
+
+struct QoderOwnerInput<'a> {
+    launcher_path: &'a Path,
+    resolved_path: &'a Path,
+    wrapper_targets: &'a [(PathBuf, PathBuf)],
+    version: Option<&'a str>,
     npm_signal: Option<ManagerSignal>,
+    install_resource: Option<Result<Option<QoderInstallResource>, String>>,
     has_native_update_cmd: bool,
+    help_checked: bool,
+    origin: &'a QoderTargetOrigin,
+}
+
+fn determine_qoder_owner_with_origin(
+    input: QoderOwnerInput<'_>,
     env: &DiscoveryEnv,
 ) -> UpdateOwner {
+    let QoderOwnerInput {
+        launcher_path,
+        resolved_path,
+        wrapper_targets,
+        version,
+        npm_signal,
+        install_resource,
+        has_native_update_cmd,
+        help_checked,
+        origin,
+    } = input;
+    let install_resource_res = install_resource.unwrap_or_else(|| {
+        detect_qoder_install_resource(
+            launcher_path,
+            resolved_path,
+            wrapper_targets,
+            env.is_windows,
+        )
+    });
+    let install_resource = match install_resource_res {
+        Ok(res) => res,
+        Err(reason) => {
+            return UpdateOwner::ManualActionRequired {
+                reason,
+                guidance: "Update Qoder CLI manually or reinstall via a verified installer or package manager.".to_string(),
+            };
+        }
+    };
+
     let mut signals = Vec::new();
     if let Some(npm_sig) = npm_signal {
         signals.push(npm_sig);
@@ -1669,6 +2851,67 @@ fn determine_qoder_owner(
                 env.is_windows,
             );
         }
+    }
+
+    match &install_resource {
+        Some(QoderInstallResource::HomebrewCask) => {
+            if signals
+                .iter()
+                .any(|s| !matches!(s, ManagerSignal::HomebrewCask { .. }))
+            {
+                return UpdateOwner::ManualActionRequired {
+                    reason: "contradictory ownership metadata detected between .qodercli-install-resource and detected package managers".to_string(),
+                    guidance: "Ensure only one package manager or native installation owns the active Qoder CLI binary.".to_string(),
+                };
+            }
+            if signals.is_empty() {
+                signals.push(ManagerSignal::HomebrewCask {
+                    brew_prefix: launcher_path
+                        .parent()
+                        .unwrap_or(launcher_path)
+                        .to_path_buf(),
+                    cask_token: "qodercli".to_string(),
+                });
+            }
+        }
+        Some(QoderInstallResource::HomebrewFormula) => {
+            if signals
+                .iter()
+                .any(|s| !matches!(s, ManagerSignal::HomebrewFormula { .. }))
+            {
+                return UpdateOwner::ManualActionRequired {
+                    reason: "contradictory ownership metadata detected between .qodercli-install-resource and detected package managers".to_string(),
+                    guidance: "Ensure only one package manager or native installation owns the active Qoder CLI binary.".to_string(),
+                };
+            }
+            if signals.is_empty() {
+                signals.push(ManagerSignal::HomebrewFormula {
+                    brew_prefix: launcher_path
+                        .parent()
+                        .unwrap_or(launcher_path)
+                        .to_path_buf(),
+                    formula: "qodercli".to_string(),
+                });
+            }
+        }
+        Some(QoderInstallResource::Npm) => {
+            if !signals
+                .iter()
+                .any(|s| matches!(s, ManagerSignal::Npm { .. }))
+            {
+                return UpdateOwner::ManualActionRequired {
+                    reason: "Qoder CLI '.qodercli-install-resource' indicates npm, but global '@qoder-ai/qodercli' ownership could not be verified".to_string(),
+                    guidance: "Update manually using npm (e.g. 'npm install -g @qoder-ai/qodercli@latest').".to_string(),
+                };
+            }
+        }
+        Some(QoderInstallResource::CurlBash) if !signals.is_empty() => {
+            return UpdateOwner::ManualActionRequired {
+                reason: "contradictory ownership metadata detected between '.qodercli-install-resource' (curl-bash) and detected package managers".to_string(),
+                guidance: "Ensure only one installation method owns the active Qoder CLI binary.".to_string(),
+            };
+        }
+        Some(QoderInstallResource::CurlBash) | None => {}
     }
 
     if has_contradictory_signals(&signals) {
@@ -1776,15 +3019,32 @@ fn determine_qoder_owner(
         };
     }
 
-    if has_native_update_cmd {
+    if origin.from_qoder_cli_bin
+        && !is_verified_qoder_cli_bin_standalone(
+            launcher_path,
+            resolved_path,
+            install_resource.as_ref(),
+            origin.entry_root.as_deref(),
+            env,
+        )
+    {
+        return UpdateOwner::ManualActionRequired {
+            reason: "QODER_CLI_BIN override points to an unverified Qoder CLI binary".to_string(),
+            guidance: "Update Qoder CLI manually using the method that manages the overridden binary, or unset QODER_CLI_BIN.".to_string(),
+        };
+    }
+
+    if has_native_update_cmd
+        || (matches!(install_resource, Some(QoderInstallResource::CurlBash)) && !help_checked)
+    {
         let bin_name = launcher_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("qodercli");
-        let cmd_label = if bin_name.eq_ignore_ascii_case("qoder") {
-            "qoder update"
-        } else {
+        let cmd_label = if origin.entry_root.is_some() || !bin_name.eq_ignore_ascii_case("qoder") {
             "qodercli update"
+        } else {
+            "qoder update"
         };
         UpdateOwner::NativeSelfUpdate {
             program: launcher_path.to_path_buf(),
@@ -1943,19 +3203,27 @@ fn inspect_candidate(
                 runner,
                 cache,
             ),
-            AgentId::Qoder => determine_qoder_owner(
-                &launcher_path,
-                &resolved_path,
-                &collect_verified_wrapper_targets(&launcher_path, &resolved_path),
-                version.as_deref(),
-                detect_npm_ownership(
-                    &launcher_path,
-                    &resolved_path,
-                    version.as_deref(),
-                    "@qoder-ai/qodercli",
-                    env.is_windows,
-                ),
-                false,
+            AgentId::Qoder => determine_qoder_owner_with_origin(
+                QoderOwnerInput {
+                    launcher_path: &launcher_path,
+                    resolved_path: &resolved_path,
+                    wrapper_targets: &collect_verified_wrapper_targets(
+                        &launcher_path,
+                        &resolved_path,
+                    ),
+                    version: version.as_deref(),
+                    npm_signal: detect_npm_ownership(
+                        &launcher_path,
+                        &resolved_path,
+                        version.as_deref(),
+                        "@qoder-ai/qodercli",
+                        env.is_windows,
+                    ),
+                    install_resource: None,
+                    has_native_update_cmd: false,
+                    help_checked: false,
+                    origin: &QoderTargetOrigin::default(),
+                },
                 env,
             ),
         }
@@ -2118,7 +3386,7 @@ pub fn parse_version_text(text: &str) -> Option<String> {
     None
 }
 
-fn is_valid_version_token(token: &str) -> bool {
+pub(super) fn is_valid_version_token(token: &str) -> bool {
     if token.is_empty() || token.len() > 64 {
         return false;
     }
@@ -2147,10 +3415,26 @@ fn is_valid_version_token(token: &str) -> bool {
 
 /// Resolves the first matching executable on `PATH`, returning `(launcher_path, resolved_path)`.
 pub fn resolve_executable_on_path(name: &str, env: &DiscoveryEnv) -> Option<(PathBuf, PathBuf)> {
-    for dir in split_path_entries(&env.path, env.is_windows) {
+    resolve_executable_on_path_filtering(name, env, |_, _| true).map(|(_, l, r)| (l, r))
+}
+
+fn resolve_executable_on_path_filtering<F>(
+    name: &str,
+    env: &DiscoveryEnv,
+    mut allow: F,
+) -> Option<(usize, PathBuf, PathBuf)>
+where
+    F: FnMut(&Path, &Path) -> bool,
+{
+    for (idx, dir) in split_path_entries(&env.path, env.is_windows)
+        .into_iter()
+        .enumerate()
+    {
         if let Some(launcher_path) = find_executable_in_dir(&dir, name, env) {
             let resolved_path = canonicalize_clean(&launcher_path);
-            return Some((launcher_path, resolved_path));
+            if allow(&launcher_path, &resolved_path) {
+                return Some((idx, launcher_path, resolved_path));
+            }
         }
     }
     None

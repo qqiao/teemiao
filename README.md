@@ -11,9 +11,9 @@ Teemiao (`teemiao`) is a Rust command-line tool for generating Git build metadat
 | Document | Contents |
 |---|---|
 | [CLI Reference (`docs/cli.md`)](docs/cli.md) | Command synopsis, verbosity flags (`-v`/`-q`), `build-info` positional syntax, JSON schema (`revision`, `build_time`), exit-status limitations, `config-template` status, and `en` / `zh-CN` localization rules. |
-| [AI Coding-Agent CLI Reference (`docs/agents.md`)](docs/agents.md) | Supported agent catalog (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`), ownership and channel verification, `--dry-run`, output streams, probe limits, exit codes, and troubleshooting. |
+| [AI Coding-Agent CLI Reference (`docs/agents.md`)](docs/agents.md) | Supported agent catalog (`codex`, `antigravity`/`agy`, `opencode`, `kimi`, `cursor`, `claude-code`/`claude`, `qoder`/`qodercli`/`qoder-cli`), ownership and channel verification, `--dry-run`, output streams, probe limits, exit codes, and troubleshooting. |
 | [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md) | Repository layout, local prerequisites, isolated fake-tool testing rules, required verification commands, CI matrix, and release-preparation checklist. |
-| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Release notes for `0.2.3`. |
+| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Prepared release notes for `0.2.4`. |
 | [Quality Constraints (`CONSTRAINTS.md`)](CONSTRAINTS.md) | Mandatory quality, safety, process-containment, and verification floor. |
 
 ## Features
@@ -36,13 +36,13 @@ Discovers and updates supported AI coding-agent CLIs resolved from the current p
 
 #### Supported Agents and Update Methods
 
-Teemiao supports seven coding-agent CLIs in catalog order: **Codex** (`codex`), **Antigravity** (`antigravity` / `agy`), **OpenCode** (`opencode`), **Kimi** (`kimi`), **Cursor** (`cursor`, via verified `agent` or `cursor-agent`), **Claude Code** (`claude-code` / `claude`), and **Qoder** (`qoder` / `qodercli`).
+Teemiao supports seven coding-agent CLIs in catalog order: **Codex** (`codex`), **Antigravity** (`antigravity` / `agy`), **OpenCode** (`opencode`), **Kimi** (`kimi`), **Cursor** (`cursor`, via verified `agent` or `cursor-agent`), **Claude Code** (`claude-code` / `claude`), and **Qoder** (`qoder` / `qodercli` / `qoder-cli`). Qoder accepts all three identifiers case-insensitively; `qoder-cli` is an argument alias, and output keeps the canonical label `Qoder (qoder)`.
 
 For the full catalog table, candidate executable precedence, and per-manager update commands (`native`, `npm`, `Homebrew`, `WinGet`, and `Codex` standalone installer), see [`docs/agents.md#supported-agents-catalog`](docs/agents.md#supported-agents-catalog).
 
 #### Discovery and Safety Boundaries
 
-- **Active `PATH` discovery only:** Only runnable executables on the current process `PATH` are inspected; desktop app bundles and editor extensions are excluded.
+- **Active `PATH` launcher discovery:** Discovery starts with runnable launchers on the current process `PATH`; desktop app bundles and editor extensions are excluded. Verified Qoder dispatchers (`~/.qoder/entry/qoder` on Unix or `%USERPROFILE%\.qoder\entry\qoder.cmd` on Windows) are inspected statically to resolve the underlying `qodercli` binary, including known install locations outside `PATH`. Standalone updates run that verified binary directly; IDE-only dispatchers without an installed CLI are excluded.
 - **Verified update selection and channel preservation:** Package-managed updates (`npm`, `Homebrew`, `WinGet`), Codex standalone updates, and Claude Code / Qoder native updates require positive local path, package, or `--help` proof. Dedicated self-updating CLIs use agent-specific checks: Antigravity and Cursor reject npm/Homebrew paths, while OpenCode and Kimi allow those paths and reject known legacy installations. Unsupported ownership or channel combinations report `manual action required`; see the per-agent rules in the guide.
 - **Bounded probes (not an OS sandbox):** Discovery probes use a 5-second timeout, a 64 KiB per-stream capture cap, and child environment overrides (`CI=1`, `DISABLE_AUTOUPDATER=1`, etc.), but executing an external binary on `PATH` is not a sandbox or a universal no-network guarantee.
 
@@ -96,6 +96,7 @@ Preview planned update commands without modifying installed software:
 teemiao agents update --dry-run
 teemiao agents update codex --dry-run
 teemiao agents update qoder --dry-run
+teemiao agents update qoder-cli --dry-run
 ```
 
 Update a single coding-agent CLI (by canonical ID or alias) or all detected coding-agent CLIs on `PATH`:
@@ -106,6 +107,7 @@ teemiao agents update agy
 teemiao agents update claude
 teemiao agents update qoder
 teemiao agents update qodercli
+teemiao agents update qoder-cli
 teemiao agents update
 ```
 
